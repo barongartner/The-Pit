@@ -48,3 +48,7 @@ __pycache__/
 
 # macOS
 .DS_Store
+
+# Internal planning doc. Kept locally, never published.
+PLAN.md
+.plan-local.md
