@@ -109,6 +109,47 @@ uv run pytest
 Requires nothing preinstalled but `uv`. Python 3.12 is managed by uv; your system Python is
 untouched.
 
+Set a contact address before running. SEC EDGAR requires one in the User-Agent and returns a
+bare 403 without it:
+
+```bash
+export THEPIT_CONTACT_EMAIL=you@example.com
+```
+
+Then two processes:
+
+```bash
+uv run python -m thepit.engine.main
+```
+
+```bash
+uv run python -m thepit.api.main
+```
+
+The dashboard is at `http://localhost:8000`. To view it from another machine on your own
+network, run a second, read-only listener:
+
+```bash
+uv run python -m thepit.api.main --lan
+```
+
+Control endpoints are not mounted on that listener. They 404 rather than 403 — the router
+does not exist, so there is no check to get wrong.
+
+### Windows
+
+The target deployment. Everything is portable Python; the platform-specific pieces:
+
+| | |
+|---|---|
+| Ctrl-C | Windows has no `add_signal_handler`, so it arrives as `KeyboardInterrupt` and skips the WAL checkpoint. Prefer `tradectl kill` or `type nul > %USERPROFILE%\.thepit\state\KILL`, which take the same shutdown path as everything else. |
+| Kill switch | A file, so it works identically. `del` the file to release. |
+| Colour | `tradectl` disables ANSI unless it detects Windows Terminal. Set `TERM` to force it on. |
+| `uvloop` | POSIX-only, and `uvicorn[standard]` already excludes it by platform marker. Slightly higher event-loop overhead on Windows, irrelevant at this scale. |
+| Paths | `~/.thepit` resolves to `%USERPROFILE%\.thepit`. |
+
+Not yet verified on a real Windows machine — see issue #16.
+
 ## Credentials
 
 Env or Keychain. Never in this repo, never in the database. Separate keys per mode:

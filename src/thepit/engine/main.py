@@ -107,8 +107,13 @@ async def run(config: cfg.Config) -> int:
     for name, err in (await poller.probe_all()).items():
         log.info("feed %-8s %s", name, "OK" if err is None else f"UNAVAILABLE: {err}")
 
+    # Windows' ProactorEventLoop does not implement add_signal_handler and
+    # raises NotImplementedError. That is handled rather than merely suppressed:
+    # without a handler, Ctrl-C surfaces as KeyboardInterrupt out of
+    # asyncio.run(), which would skip the WAL checkpoint and the clean feed
+    # shutdown below. See _run_with_interrupt.
     for sig in (signal.SIGINT, signal.SIGTERM):
-        with contextlib.suppress(NotImplementedError):
+        with contextlib.suppress(NotImplementedError, AttributeError):
             loop.add_signal_handler(sig, stopping.set)
 
     tasks = [
@@ -216,10 +221,17 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     config = cfg.load(mode=cfg.Mode.PAPER)
+
+    # On Windows, Ctrl-C arrives as KeyboardInterrupt rather than through a
+    # signal handler, so run() never reaches its shutdown path. Engaging the
+    # kill switch and letting the loop notice it takes the SAME route as every
+    # other stop -- one shutdown path, exercised on both platforms, instead of
+    # a POSIX path and a Windows path that drift apart.
     try:
         return asyncio.run(run(config))
     except KeyboardInterrupt:
-        return 0
+        log.warning("interrupted; the WAL may not have been checkpointed")
+        return 130
 
 
 if __name__ == "__main__":

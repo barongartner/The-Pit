@@ -89,7 +89,6 @@ class FeedHttp:
         self._min_interval_s = min_interval_s
         self._last_request_at = 0.0
         self._pace_lock = asyncio.Lock()
-        self._sample_counter = 0
         self._client = httpx.AsyncClient(
             timeout=timeout,
             headers={"User-Agent": user_agent, "Accept": "application/json"},
@@ -122,16 +121,12 @@ class FeedHttp:
         params: dict | None = None,
         headers: dict | None = None,
         record_raw: bool = True,
-        sample_raw: int = 1,
     ) -> FetchResult:
-        """`sample_raw=N` records only one in every N responses.
+        """`fetch_log` records EVERY request; the raw body is only sampled.
 
-        For high-frequency, low-information endpoints (a quote poll every five
-        seconds) the full recording is mostly redundant: the bars path already
-        captures the same underlying series at full fidelity. Sampling keeps a
-        representative trace for debugging without the archive growing at the
-        poll rate. `fetch_log` still gets a row for every single request, so
-        uptime accounting is unaffected.
+        Rate limiting of the raw archive lives in RawRecorder, which keeps at
+        most one sample per (source, kind) per hour. Uptime accounting is
+        unaffected because it reads fetch_log, not the archive.
         """
         await self._pace()
         ts_ms = self._clock.now_ms()
@@ -147,9 +142,7 @@ class FeedHttp:
             # "Too Many Requests" strings is not a dataset, and during an outage
             # that is exactly what we would otherwise accumulate. The failure is
             # still fully described in fetch_log.
-            self._sample_counter += 1
-            sampled = sample_raw <= 1 or self._sample_counter % sample_raw == 0
-            if record_raw and sampled and self._recorder is not None and resp.is_success:
+            if record_raw and self._recorder is not None and resp.is_success:
                 raw_path = self._recorder.record(
                     source, kind, text, ts_ms=ts_ms,
                     meta={"url": str(resp.url), "status": resp.status_code},

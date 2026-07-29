@@ -45,7 +45,7 @@ def test_path_is_partitioned_by_source_kind_and_hour(tmp_path):
 def test_appends_stay_readable_as_one_stream(tmp_path):
     """Appending writes a new gzip member. Concatenated members are a valid
     gzip stream, so the hour file must still read back whole."""
-    r = RawRecorder(tmp_path)
+    r = RawRecorder(tmp_path, min_interval_s=0)
     for i in range(5):
         r.record("yahoo", "bars", json.dumps({"i": i}), ts_ms=TS + i)
 
@@ -57,7 +57,7 @@ def test_appends_stay_readable_as_one_stream(tmp_path):
 
 def test_same_hour_shares_one_file(tmp_path):
     """Millions of small files is the failure mode this avoids."""
-    r = RawRecorder(tmp_path)
+    r = RawRecorder(tmp_path, min_interval_s=0)
     a = r.record("yahoo", "bars", "1", ts_ms=TS)
     b = r.record("yahoo", "bars", "2", ts_ms=TS + 60_000)
     assert a == b
@@ -65,7 +65,7 @@ def test_same_hour_shares_one_file(tmp_path):
 
 
 def test_different_hours_split(tmp_path):
-    r = RawRecorder(tmp_path)
+    r = RawRecorder(tmp_path, min_interval_s=0)
     r.record("yahoo", "bars", "1", ts_ms=TS)
     r.record("yahoo", "bars", "2", ts_ms=TS + 3_600_000)
     assert len(list(tmp_path.rglob("*.jsonl.gz"))) == 2
@@ -146,3 +146,43 @@ def test_fixed_clock_is_controllable():
     assert c.now_ms() == 1000
     c.advance(500)
     assert c.now_ms() == 1500
+
+
+# ---------------------------------------------------------------------------
+# Sampling. The archive is a diagnostic trace, not a complete mirror.
+# ---------------------------------------------------------------------------
+
+
+def test_repeated_responses_are_sampled_not_archived(tmp_path):
+    """Every bars fetch returns the whole day, so storing each one kept the
+    09:30 candle ~78 times a session. The database is the deduplicated dataset;
+    this is a sample."""
+    r = RawRecorder(tmp_path, min_interval_s=3600)
+
+    first = r.record("yahoo", "bars", "payload", ts_ms=TS)
+    assert first is not None
+
+    # Same hour: skipped.
+    for i in range(1, 60):
+        assert r.record("yahoo", "bars", "payload", ts_ms=TS + i * 60_000) is None
+
+    # An hour later: sampled again.
+    assert r.record("yahoo", "bars", "payload", ts_ms=TS + 3_600_000) is not None
+
+
+def test_sampling_is_per_source_and_kind(tmp_path):
+    """Throttling yahoo/bars must not suppress edgar/news."""
+    r = RawRecorder(tmp_path, min_interval_s=3600)
+    assert r.record("yahoo", "bars", "a", ts_ms=TS) is not None
+    assert r.record("yahoo", "quote", "b", ts_ms=TS) is not None
+    assert r.record("edgar", "news", "c", ts_ms=TS) is not None
+    assert r.record("yahoo", "bars", "d", ts_ms=TS + 1000) is None
+
+
+def test_force_bypasses_sampling(tmp_path):
+    """Parse failures are recorded unconditionally: bytes the parser did not
+    understand are the one case where raw is the entire point."""
+    r = RawRecorder(tmp_path, min_interval_s=3600)
+    assert r.record("yahoo", "bars", "ok", ts_ms=TS) is not None
+    assert r.record("yahoo", "bars", "dup", ts_ms=TS + 1000) is None
+    assert r.record("yahoo", "bars", "broken", ts_ms=TS + 2000, force=True) is not None

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import UTC, datetime
 
@@ -32,7 +33,28 @@ from thepit.engine.killswitch import KillSwitch
 from thepit.store import db
 from thepit.store.repos import FetchLogRepo
 
-GREEN, RED, YELLOW, DIM, RESET = "\033[32m", "\033[31m", "\033[33m", "\033[2m", "\033[0m"
+def _supports_colour() -> bool:
+    """ANSI escapes only when they will actually render.
+
+    Piping `tradectl status` into a file or grep should not litter it with
+    escape sequences, and legacy Windows consoles render them as garbage.
+    Windows Terminal and PowerShell 7 handle ANSI fine; cmd.exe on older builds
+    does not, and there is no reliable way to tell them apart, so the safe
+    default on Windows is off unless the environment advertises otherwise.
+    """
+    if not sys.stdout.isatty() or os.environ.get("NO_COLOR"):
+        return False
+    if sys.platform == "win32":
+        return bool(os.environ.get("WT_SESSION") or os.environ.get("TERM"))
+    return True
+
+
+if _supports_colour():
+    GREEN, RED, YELLOW, DIM, RESET = (
+        "\033[32m", "\033[31m", "\033[33m", "\033[2m", "\033[0m"
+    )
+else:
+    GREEN = RED = YELLOW = DIM = RESET = ""
 
 
 def _ts(ms: int) -> str:

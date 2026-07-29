@@ -109,9 +109,6 @@ class YahooChartFeed:
                 # endpoint: that alone was ~1GB/day of recording, or 361GB/year,
                 # on a machine with 22GB free.
                 params={"range": "1d", "interval": "1d"},
-                # One in twelve: roughly one recorded quote snapshot per symbol
-                # per minute, which is the same cadence the bars path runs at.
-                sample_raw=12,
             )
             records.append(res.record)
             if not res.ok or res.text is None:

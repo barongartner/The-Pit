@@ -34,9 +34,33 @@ class RawRecorder:
     lock here would imply otherwise.
     """
 
-    def __init__(self, root: Path | str, *, enabled: bool = True) -> None:
+    def __init__(
+        self,
+        root: Path | str,
+        *,
+        enabled: bool = True,
+        min_interval_s: float = 3600.0,
+    ) -> None:
         self.root = Path(root)
         self.enabled = enabled
+        # At most one recorded sample per (source, kind) per interval.
+        #
+        # This started as a complete archive and that was the wrong shape. Every
+        # bars fetch returns the ENTIRE day of candles, so recording each one
+        # stored the 09:30 bar about 78 times over a session -- 84MB/day of
+        # almost entirely duplicate bytes.
+        #
+        # The database is already the compact, deduplicated dataset: bars are
+        # keyed (symbol, tf, ts_ms, source) with ON CONFLICT DO NOTHING, so each
+        # candle is stored exactly once, at ~4MB/day.
+        #
+        # What raw is actually for is narrower than "own the dataset":
+        #   * a worked example of each provider's response shape, and
+        #   * the payload of anything that failed to parse, which is the only
+        #     time you genuinely need bytes the parser did not understand.
+        # Both are served by a periodic sample plus forced recording on failure.
+        self.min_interval_s = min_interval_s
+        self._last_written: dict[tuple[str, str], float] = {}
 
     def record(
         self,
@@ -46,6 +70,7 @@ class RawRecorder:
         *,
         ts_ms: int,
         meta: dict | None = None,
+        force: bool = False,
     ) -> str | None:
         """Append one response. Returns the path to store in `fetch_log.raw_path`.
 
@@ -57,6 +82,15 @@ class RawRecorder:
         """
         if not self.enabled:
             return None
+
+        # `force` bypasses the sample interval. Used for parse failures, which
+        # are the case where the raw bytes are the entire point.
+        if not force:
+            key = (source, kind)
+            last = self._last_written.get(key, 0.0)
+            if (ts_ms / 1000) - last < self.min_interval_s:
+                return None
+            self._last_written[key] = ts_ms / 1000
 
         try:
             dt = datetime.fromtimestamp(ts_ms / 1000, tz=UTC)
