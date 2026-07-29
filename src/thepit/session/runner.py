@@ -375,7 +375,29 @@ class SessionRunner:
     def _tick_prompt(self, minutes_left: int) -> str:
         eq = self.book.equity(self._quotes)
         pnl = eq - self._cfg.capital
-        lines = [
+
+        lines: list[str] = []
+
+        # The plan, restated verbatim, every tick.
+        #
+        # It was previously absent entirely. The agent wrote a plan and then
+        # never saw it again, relying on the resumed conversation to remember
+        # it. It did not: in one session it planned entries at TSLA 303.50 /
+        # NVDA 193.50, then bought at 304.82 / 194.80 and wrote in its own
+        # review "Violated plan... Chasing late entries lost the session."
+        #
+        # Restating it costs a few hundred tokens and is the difference between
+        # a plan and a wish.
+        plan = self._plan_text()
+        if plan:
+            lines += ["## Your plan, which you committed to before this session",
+                      plan.strip(), "",
+                      "Do not enter at a price materially worse than you planned. "
+                      "If your level never comes, that is exactly what your "
+                      "stand-down condition is for. Chasing a missed entry turns "
+                      "a good setup into a bad one.", ""]
+
+        lines += [
             f"## {minutes_left} minutes left to open positions",
             "After that you will be flattened automatically.",
             "",
