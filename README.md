@@ -138,7 +138,31 @@ does not exist, so there is no check to get wrong.
 
 ### Windows
 
-The target deployment. Everything is portable Python; the platform-specific pieces:
+The target deployment.
+
+```powershell
+git clone https://github.com/barongartner/The-Pit.git
+cd The-Pit
+powershell -ExecutionPolicy Bypass -File setup.ps1
+```
+
+`setup.ps1` installs uv if missing, fetches Python 3.12, syncs dependencies, runs
+the tests, saves your SEC contact email, and checks for the `claude` CLI. Safe to
+re-run.
+
+Then two terminals:
+
+```powershell
+uv run python -m thepit.engine.main
+```
+
+```powershell
+uv run python -m thepit.api.main
+```
+
+Dashboard at `http://localhost:8000`.
+
+Platform-specific pieces, all already handled in code:
 
 | | |
 |---|---|
