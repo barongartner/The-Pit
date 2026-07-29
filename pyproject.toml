@@ -1,0 +1,44 @@
+[project]
+name = "thepit"
+version = "0.1.0"
+description = "Local testbed for independent Claude-powered trading agents"
+requires-python = ">=3.12"
+
+# Three runtime dependencies. Nothing else gets added without asking.
+#
+# Deliberately absent:
+#   anthropic   - agents run via the `claude` CLI on a subscription, not the metered API
+#   pandas/numpy- indicators are O(1) streaming; pandas costs ~50MB RSS and tempts
+#                 per-tick DataFrame rebuilds. numpy may return inside the replay harness.
+#   sqlalchemy  - hides the explicit BEGIN IMMEDIATE transaction control this design needs
+#   alembic     - numbered .sql files + meta.schema_version is 30 lines and inspectable
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "httpx>=0.28",
+]
+
+[project.scripts]
+tradectl = "thepit.cli.tradectl:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/thepit"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+filterwarnings = ["error"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"

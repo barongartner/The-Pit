@@ -1,0 +1,50 @@
+# ---------------------------------------------------------------------------
+# THIS REPO IS PUBLIC. Nothing below ever gets committed.
+# Written before any of it exists, because cleaning it out of history later is
+# painful and usually incomplete.
+# ---------------------------------------------------------------------------
+
+# Credentials. Never, in any mode.
+.env
+.env.*
+!.env.example
+secrets/
+*.pem
+*.key
+
+# Databases: positions, orders, fills, capital, agent reasoning.
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+data/paper/
+data/live/
+
+# Recorded feed responses. This is the dataset; it is also a record of exactly
+# what was watched and when.
+data/raw/
+
+# Agent reasoning, audit chain, journals, session ids.
+logs/
+journals/
+audit/
+blobs/
+
+# Runtime state: KILL, FLATTEN, HEARTBEAT, LIVE_ENABLED, pid files.
+state/
+
+# Vendored frontend libs are committed deliberately (see web/vendor/README.md).
+# Everything else node touches is not.
+node_modules/
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# macOS
+.DS_Store
