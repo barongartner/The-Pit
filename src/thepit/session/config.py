@@ -11,7 +11,7 @@ knows its hurdle and its clock earns more than one that does not.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 
 
@@ -34,6 +34,35 @@ class ResearchAccess(StrEnum):
     OFF = "off"                      # price action only
     AMBIENT = "ambient"              # watchlist news/filings pushed into context
     REQUESTED = "ambient+requested"  # plus harness-mediated lookups it asks for
+
+
+class RiskProfile(StrEnum):
+    """Preset risk postures.
+
+    The defaults elsewhere in this file are tuned for capital preservation --
+    20% per position, halt at a 2% session loss. On $20 of money you are willing
+    to lose entirely, that is the wrong objective: a 2% limit is 40 cents, and a
+    20% cap leaves five sixths of the account idle while the window expires.
+
+    A correct call in an 8-minute session earned one cent because two thirds of
+    the available capital sat unused. The agent's own review: "Reserve capital
+    on an 8-minute session is just money left on the table."
+    """
+
+    PRESERVE = "preserve"    # capital preservation. Sensible on real money.
+    BALANCED = "balanced"
+    RISK_IT = "risk_it"      # money you can afford to lose entirely.
+
+
+# max_position_pct, session_loss_limit_pct, max_concurrent_positions
+PROFILES: dict[RiskProfile, tuple[float, float, int]] = {
+    RiskProfile.PRESERVE: (20.0, 2.0, 3),
+    RiskProfile.BALANCED: (50.0, 15.0, 2),
+    # All-in on the single best idea, halt only near total loss. Concentration
+    # is the point: diversifying $20 across three names guarantees that being
+    # right is indistinguishable from being wrong.
+    RiskProfile.RISK_IT: (100.0, 60.0, 1),
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +99,11 @@ class SessionConfig:
 
     notes: str = ""
 
+    def with_profile(self, profile: RiskProfile) -> "SessionConfig":
+        pos, loss, concurrent = PROFILES[profile]
+        return replace(self, max_position_pct=pos, session_loss_limit_pct=loss,
+                       max_concurrent_positions=concurrent)
+
     def validate(self) -> list[str]:
         """Return reasons this config cannot run. Empty means it is coherent."""
         errors: list[str] = []
@@ -92,6 +126,8 @@ class SessionConfig:
             errors.append("flatten window is longer than the session")
         if not 0 < self.max_position_pct <= 100:
             errors.append("max position must be between 0 and 100 percent")
+        if not 0 < self.session_loss_limit_pct <= 100:
+            errors.append("session loss limit must be between 0 and 100 percent")
         if self.max_concurrent_positions < 1:
             errors.append("max concurrent positions must be at least 1")
 

@@ -44,7 +44,9 @@ from thepit.core import calendar
 from thepit.core.clock import SystemClock, now_ms
 from thepit.engine.killswitch import KillSwitch
 from thepit.store import db
-from thepit.session.config import Blinding, ResearchAccess, SessionConfig, SessionReadiness
+from thepit.session.config import (
+    Blinding, ResearchAccess, RiskProfile, SessionConfig, SessionReadiness,
+)
 from thepit.session.prompt import build_plan_prompt
 from thepit.session.runner import SessionRunner
 from thepit.agent import claude as claude_mod
@@ -474,6 +476,12 @@ def _parse_session(
             run_baseline=bool(payload.get("run_baseline", True)),
             notes=str(payload.get("notes", "")),
         )
+        # A profile overrides the three risk fields wholesale. Applied after
+        # construction so an explicit value can still win by sending
+        # profile="custom".
+        profile = payload.get("risk_profile")
+        if profile and profile != "custom":
+            cfg_obj = cfg_obj.with_profile(RiskProfile(profile))
     except (ValueError, TypeError) as exc:
         return SessionConfig(), [f"malformed config: {exc}"]
     return cfg_obj, cfg_obj.validate()

@@ -199,12 +199,19 @@
         <select id="f-duration">
           <option>15</option><option selected>30</option><option>45</option><option>60</option>
         </select></div>
-      <div><label>Capital ($)</label><input id="f-capital" type="number" value="10000" step="1000"></div>
+      <div><label>Capital ($)</label><input id="f-capital" type="number" value="20" step="5"></div>
       <div><label>Policy tick (min)</label>
         <select id="f-tick"><option>1</option><option>2</option><option selected>5</option><option>10</option></select></div>
-      <div><label>Max position (%)</label><input id="f-maxpos" type="number" value="20"></div>
-      <div><label>Max concurrent</label><input id="f-maxcon" type="number" value="3"></div>
-      <div><label>Session loss limit (%)</label><input id="f-loss" type="number" value="2" step="0.5"></div>
+      <div><label>Risk profile</label>
+        <select id="f-risk">
+          <option value="preserve">preserve capital (20% / stop -2%)</option>
+          <option value="balanced">balanced (50% / stop -15%)</option>
+          <option value="risk_it" selected>risk it all (100% / stop -60%)</option>
+          <option value="custom">custom</option>
+        </select></div>
+      <div><label>Max position (%)</label><input id="f-maxpos" type="number" value="100"></div>
+      <div><label>Max concurrent</label><input id="f-maxcon" type="number" value="1"></div>
+      <div><label>Session loss limit (%)</label><input id="f-loss" type="number" value="60" step="5"></div>
       <div><label>Flatten before end (min)</label><input id="f-flat" type="number" value="2"></div>
       <div><label>Model</label>
         <select id="f-model"><option>haiku</option><option selected>sonnet</option><option>opus</option></select></div>
@@ -424,6 +431,7 @@
       duration_minutes: +$("f-duration").value,
       capital: +$("f-capital").value,
       policy_tick_minutes: +$("f-tick").value,
+      risk_profile: $("f-risk").value,
       max_position_pct: +$("f-maxpos").value,
       max_concurrent_positions: +$("f-maxcon").value,
       session_loss_limit_pct: +$("f-loss").value,
@@ -470,6 +478,18 @@
       `<span style="color:${heavy ? 'var(--down)' : 'inherit'}">` +
       `${d.config.model_calls} model calls (~${d.config.latency_s}s waiting)</span>` +
       (heavy ? ` — heavy on your 5-hour window` : "");
+  }
+
+  // Selecting a profile fills the three fields, so the numbers stay visible and
+  // editable rather than hidden behind a label.
+  const PROFILES = {preserve: [20, 2, 3], balanced: [50, 15, 2], risk_it: [100, 60, 1]};
+  $("f-risk").onchange = () => {
+    const p = PROFILES[$("f-risk").value];
+    if (p) { $("f-maxpos").value = p[0]; $("f-loss").value = p[1]; $("f-maxcon").value = p[2]; }
+    previewSession();
+  };
+  for (const id of ["f-maxpos", "f-loss", "f-maxcon"]) {
+    $(id).onchange = () => { $("f-risk").value = "custom"; previewSession(); };
   }
 
   $("mft-preview").onclick = e => { e.preventDefault(); previewSession(); };

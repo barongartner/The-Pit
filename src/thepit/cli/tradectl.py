@@ -133,6 +133,58 @@ def cmd_release(config: cfg.Config, args) -> int:
     return 0
 
 
+def cmd_sessions(config: cfg.Config, args) -> int:
+    """List sessions with P&L computed the ONLY correct way.
+
+    `cash - capital` is not P&L. While a position is open that difference is
+    just the money currently sitting in stock, and it reads as a catastrophic
+    loss: an interrupted session holding 8 NVDA showed "-$3,060" when its actual
+    P&L was -$1.97. Two separate ad-hoc queries made that mistake, so the
+    correct calculation lives here instead of being retyped.
+
+    P&L = (cash + positions marked to market) - starting capital.
+    """
+    if not config.db_path.exists():
+        print("no database yet", file=sys.stderr)
+        return 1
+
+    conn = db.connect(config.db_path, readonly=True)
+    try:
+        marks = {
+            r["symbol"]: r["last"] for r in conn.execute(
+                "SELECT t.symbol, t.last FROM ticks t JOIN "
+                "(SELECT symbol s, MAX(ts_ms) m FROM ticks GROUP BY symbol) x "
+                "ON x.s = t.symbol AND x.m = t.ts_ms")
+        }
+        rows = conn.execute(
+            "SELECT * FROM sessions ORDER BY id DESC LIMIT ?", (args.limit,)
+        ).fetchall()
+        if not rows:
+            print("no sessions yet")
+            return 0
+
+        print(f"{'id':>3}  {'status':10s} {'capital':>10s} {'equity':>10s} "
+              f"{'P&L':>9s}  {'':2s} positions")
+        for r in rows:
+            positions = conn.execute(
+                "SELECT symbol, qty, avg_price FROM positions "
+                "WHERE session_id=? AND ABS(qty) > 1e-9", (r["id"],)).fetchall()
+            held = sum(p["qty"] * marks.get(p["symbol"], p["avg_price"])
+                       for p in positions)
+            equity = r["cash"] + held
+            pnl = equity - r["capital"]
+            colour = GREEN if pnl > 0 else RED if pnl < 0 else ""
+            flag = "!" if r["status"] in ("halted", "failed") else " "
+            desc = ", ".join(f"{p['symbol']} {p['qty']:g}" for p in positions) or "flat"
+            print(f"{r['id']:>3}  {r['status']:10s} {r['capital']:>10,.2f} "
+                  f"{equity:>10,.2f} {colour}{pnl:>+9,.2f}{RESET}  {flag}  {desc}")
+            if r["halt_reason"]:
+                print(f"     {DIM}{r['halt_reason']}{RESET}")
+    finally:
+        conn.close()
+    return 0
+
+
 def cmd_uptime(config: cfg.Config, args) -> int:
     """The 24h proof.
 
@@ -202,6 +254,9 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("release", help="clear the kill switch (deliberate, manual)")
 
+    ss = sub.add_parser("sessions", help="session list with correct P&L")
+    ss.add_argument("--limit", type=int, default=10)
+
     u = sub.add_parser("uptime", help="feed uptime and gap report")
     u.add_argument("--hours", type=int, default=24)
     u.add_argument("--max-gap-min", type=int, default=10)
@@ -211,7 +266,7 @@ def main(argv: list[str] | None = None) -> int:
     config = cfg.load(mode=cfg.Mode.PAPER)
 
     return {
-        "status": cmd_status, "kill": cmd_kill,
+        "status": cmd_status, "kill": cmd_kill, "sessions": cmd_sessions,
         "release": cmd_release, "uptime": cmd_uptime,
     }[args.cmd](config, args)
 
