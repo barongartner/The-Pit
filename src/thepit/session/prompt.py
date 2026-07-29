@@ -261,17 +261,16 @@ def build_plan_prompt(
         "outcome, and you will be asked at the end to compare what happened "
         "against it.")
     add("")
-    add("Include:")
-    add("1. **Regime** -- what kind of market this is, citing specific numbers above.")
-    add("2. **Watchlist** -- which symbols you will actually trade, and why those.")
-    add("3. **Setup** -- the specific conditions that would make you enter.")
-    add("4. **Exit** -- stop and target for each, in basis points or price.")
-    add("5. **Sizing** -- how large, and why that size given the volatility shown.")
-    add("6. **Stand-down conditions** -- the specific, narrow circumstances in "
-        "which you would trade nothing at all. Be strict with yourself here: "
-        "a stand-down rule wide enough to catch an ordinary session is a way "
-        "of guaranteeing zero.")
-    add("7. **Conviction (1-10)** -- how much you expect this plan to work. This is "
-        "scored against outcomes across many sessions, so be honest rather than "
-        "confident.")
+    add("**Under 900 characters total. Plain lines, no headings, no prose.** "
+        "Numbers, levels and conditions only.")
+    add("")
+    add("regime: <one line, cite specific numbers above>")
+    add("watchlist: <symbols you will actually trade, one clause each on why>")
+    add("entry: <the specific condition or level that triggers a buy, per symbol>")
+    add("exit: <stop and target, in bp or price, per symbol>")
+    add("size: <shares or dollars, and why that size given the volatility shown>")
+    add("standdown: <the narrow circumstances in which you trade nothing. Be "
+        "strict: a rule wide enough to catch an ordinary session guarantees zero>")
+    add("conviction: <1-10, scored against outcomes across many sessions, so be "
+        "honest rather than confident>")
     return "\n".join(lines)

@@ -28,6 +28,32 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+# Appended to the CLI's own system prompt on every call.
+#
+# Without this the model answers like a chat assistant: preamble, markdown
+# headings, restating the question, a closing summary. A plan came back at 3,839
+# characters and a review at 2,371, almost all of it structure rather than
+# content. Every one of those tokens is drawn from a shared rate-limit window,
+# and none of them reach the execution engine, which reads two JSON fields.
+#
+# This does not ask for shorter *thinking*. It asks for shorter *output*.
+TERSE_SYSTEM = """You are a component inside a trading engine, not a chat assistant.
+
+Output rules, which override any default style:
+- No preamble, no sign-off, no restating the question back.
+- No markdown headings, no bold, no bullet decoration, unless the requested
+  format explicitly uses them.
+- When JSON is requested, emit the raw JSON object and nothing else. No prose
+  before or after, no code fences.
+- Prefer numbers to adjectives. "NVDA +48bp/5m, vol 9.3bp/min" beats "NVDA is
+  showing strong momentum with elevated volatility".
+- Never explain your reasoning process. State conclusions.
+- Respect stated character limits exactly.
+
+Terseness is a hard requirement: your output consumes a shared rate limit, and
+the engine reads only the fields it asked for."""
+
+
 class ClaudeUnavailable(RuntimeError):
     """The CLI is not installed or not reachable."""
 
@@ -88,15 +114,17 @@ async def ask(
     effort: str = "medium",
     session_id: str | None = None,
     timeout_s: float = 180.0,
+    system: str | None = TERSE_SYSTEM,
 ) -> ClaudeResult:
     """Run one turn. Blocking subprocess, moved off the event loop."""
     return await asyncio.to_thread(
-        _run, prompt, model, effort, session_id, timeout_s
+        _run, prompt, model, effort, session_id, timeout_s, system
     )
 
 
 def _run(
-    prompt: str, model: str, effort: str, session_id: str | None, timeout_s: float
+    prompt: str, model: str, effort: str, session_id: str | None, timeout_s: float,
+    system: str | None = TERSE_SYSTEM,
 ) -> ClaudeResult:
     binary = find_binary()
 
@@ -112,6 +140,8 @@ def _run(
         args += ["--effort", effort]
     if session_id:
         args += ["--resume", session_id]
+    if system:
+        args += ["--append-system-prompt", system]
 
     # No tools. A trading agent has no business touching a shell or a
     # filesystem, so --dangerously-skip-permissions is deliberately not carried

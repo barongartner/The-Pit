@@ -272,13 +272,13 @@ class SessionRunner:
             f"{self._plan_text() or '(none recorded)'}\n\n"
             "## What actually happened\n"
             f"{summary}\n\n"
-            "Answer in a few short paragraphs:\n"
-            "1. Did you follow your plan? Where exactly did you deviate?\n"
-            "2. Did deviating help or hurt?\n"
-            "3. Was your conviction justified by the outcomes?\n"
-            "4. What would you do differently, specifically?\n\n"
-            "Be blunt. A session that lost money and says so usefully is worth "
-            "more than one that made money and cannot say why."
+            "**Under 600 characters. Four plain lines, no headings.**\n\n"
+            "followed: <did you follow the plan, and exactly where you deviated>\n"
+            "deviation: <did deviating help or hurt, with the number>\n"
+            "conviction: <was it justified by what happened>\n"
+            "next: <one specific change, not a platitude>\n\n"
+            "Be blunt. A session that lost money and says why usefully is worth "
+            "more than one that made money and cannot."
         )
         res = await self._ask(prompt, phase="review")
         if res is not None:
