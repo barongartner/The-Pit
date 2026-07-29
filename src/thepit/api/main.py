@@ -59,8 +59,49 @@ WEB_DIR = Path(__file__).resolve().parents[3] / "web"
 PUSH_INTERVAL_S = 1.0
 
 
+# A session whose heartbeat is older than this is not being driven by anything.
+# Generous: the runner beats every second while waiting, but a long model call
+# can block the loop for the better part of a minute.
+SESSION_STALE_S = 120
+
+
+def _reap_orphans(config: cfg.Config) -> int:
+    """Mark sessions whose driving process is gone.
+
+    Sessions run as an asyncio task inside this process. Restart the API and the
+    task dies -- but the row still said 'running', forever, with nothing to
+    detect it. That is how a session was lost with no trace: it looked alive and
+    was not.
+
+    Called at startup and on every session read, so the state can never be a
+    lie for longer than one poll.
+    """
+    conn = db.connect(config.db_path)
+    try:
+        now = now_ms()
+        cur = conn.execute(
+            "UPDATE sessions SET status='halted', "
+            "halt_reason=COALESCE(halt_reason,"
+            "'interrupted: the process driving this session stopped'), "
+            "finished_ms=? "
+            "WHERE status IN ('running','flattening') "
+            "AND (heartbeat_ms IS NULL OR heartbeat_ms < ?)",
+            (now, now - SESSION_STALE_S * 1000),
+        )
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.close()
+
+
 def create_app(config: cfg.Config, *, allow_control: bool) -> FastAPI:
     app = FastAPI(title="The Pit", docs_url=None, redoc_url=None)
+
+    if allow_control:
+        # Only the writer reaps. A read-only LAN listener must not try.
+        reaped = _reap_orphans(config)
+        if reaped:
+            print(f"marked {reaped} orphaned session(s) as interrupted")
 
     # Read-only at the URI level. A stray write raises at the offending line
     # instead of showing up as intermittent SQLITE_BUSY under load.
@@ -217,8 +258,22 @@ def create_app(config: cfg.Config, *, allow_control: bool) -> FastAPI:
         finally:
             c.close()
 
+    @read.get("/api/sessions/{sid}/activity")
+    def session_activity(sid: int, after: int = 0) -> JSONResponse:
+        c = conn()
+        try:
+            rows = c.execute(
+                "SELECT id,ts_ms,kind,message,pending FROM activity "
+                "WHERE session_id=? AND id > ? ORDER BY id LIMIT 200",
+                (sid, after)).fetchall()
+            return JSONResponse([dict(r) for r in rows])
+        finally:
+            c.close()
+
     @read.get("/api/sessions/{sid}")
     def session_detail(sid: int) -> JSONResponse:
+        if allow_control:
+            _reap_orphans(config)
         c = conn()
         try:
             s_row = c.execute("SELECT * FROM sessions WHERE id=?", (sid,)).fetchone()
@@ -232,8 +287,14 @@ def create_app(config: cfg.Config, *, allow_control: bool) -> FastAPI:
                 p["qty"] * quotes[p["symbol"]].last
                 for p in positions if p["symbol"] in quotes)
 
+            stale = (
+                s_row["status"] in ("running", "flattening")
+                and (s_row["heartbeat_ms"] is None
+                     or now_ms() - s_row["heartbeat_ms"] > SESSION_STALE_S * 1000)
+            )
             return JSONResponse({
                 "session": dict(s_row),
+                "alive": not stale,
                 "equity": equity,
                 "pnl": equity - s_row["capital"],
                 "positions": positions,

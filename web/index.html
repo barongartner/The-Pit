@@ -84,6 +84,23 @@
   details { margin-top: 8px; }
   summary { cursor: pointer; color: var(--dim); font: 11px var(--mono);
             text-transform: uppercase; letter-spacing: .08em; }
+  .console {
+    background: #08090b; border: 1px solid var(--line); border-radius: 4px;
+    padding: 10px 12px; font: 12px/1.65 var(--mono); max-height: 260px;
+    overflow-y: auto; margin-bottom: 10px;
+  }
+  .console div { display: flex; gap: 10px; }
+  .console .t { color: #4b5262; flex: 0 0 auto; }
+  .console .m { color: #b9c0cc; }
+  .console .k-phase .m { color: var(--accent); }
+  .console .k-fill  .m { color: var(--up); }
+  .console .k-error .m { color: var(--down); }
+  .console .k-order .m { color: var(--down); }
+  .console .k-wait  .m { color: var(--dim); }
+  .console .live .m::after {
+    content: " ▊"; animation: blink 1.1s steps(2) infinite; color: var(--accent);
+  }
+  @keyframes blink { 50% { opacity: 0; } }
   details pre { white-space: pre-wrap; font: 12px/1.5 var(--mono); color: #cfd4dd;
                 background: var(--panel); padding: 10px; border-radius: 4px;
                 max-height: 240px; overflow-y: auto; }
@@ -474,6 +491,7 @@
       return;
     }
     activeSession = d.session_id;
+    lastActivityId = 0;
     dlg.close();
     loadSession();
   };
@@ -482,7 +500,41 @@
   }
 
   // ---- session panel --------------------------------------------------------
+  //
+  // The console is the point. During a 40-second model call or a 3-minute wait
+  // between ticks, nothing else on this page changes -- which made a working
+  // session and a dead one look identical. Two sessions were lost that way
+  // before this existed.
   let activeSession = null;
+  let lastActivityId = 0;
+  let pendingSince = null;
+
+  async function loadActivity() {
+    if (activeSession == null) return;
+    const rows = await fetch(`/api/sessions/${activeSession}/activity?after=${lastActivityId}`)
+                       .then(r => r.json()).catch(() => []);
+    const box = $("console");
+    if (!box) return;
+
+    for (const r of rows) {
+      lastActivityId = Math.max(lastActivityId, r.id);
+      const el = document.createElement("div");
+      el.className = `k-${r.kind}` + (r.pending ? " live" : "");
+      el.dataset.id = r.id;
+      el.innerHTML = `<span class="t">${new Date(r.ts_ms).toLocaleTimeString([], 
+        {hour12: false})}</span><span class="m">${esc(r.message)}</span>`;
+      box.appendChild(el);
+      pendingSince = r.pending ? Date.now() : null;
+    }
+    // A finished line stops being "live"; re-fetch clears stale pending flags.
+    if (rows.some(r => !r.pending)) {
+      for (const el of box.querySelectorAll(".live")) {
+        const row = rows.find(r => String(r.id) === el.dataset.id);
+        if (row && !row.pending) el.classList.remove("live");
+      }
+    }
+    box.scrollTop = box.scrollHeight;
+  }
 
   async function loadSession() {
     if (activeSession == null) {
@@ -503,7 +555,7 @@
     const spend = d.decisions.reduce((a, x) => a + (x.cost_usd || 0), 0);
 
     let html = `<div class="kv">
-      <span>#${s.id} <b>${s.status}</b></span>
+      <span>#${s.id} <b>${s.status}</b>${d.alive === false && live ? " (no heartbeat)" : ""}</span>
       <span>equity <b>$${d.equity.toFixed(2)}</b></span>
       <span class="${pnlCls}">P&L <b>${d.pnl >= 0 ? "+" : ""}$${d.pnl.toFixed(2)}</b></span>
       <span>cash <b>$${s.cash.toFixed(2)}</b></span>
@@ -511,6 +563,7 @@
     </div>`;
 
     if (s.halt_reason) html += `<div class="stat down">halted: ${s.halt_reason}</div>`;
+    html += `<div class="console" id="console"></div>`;
 
     html += open.length
       ? "<ul class='log'>" + open.map(p =>
@@ -535,13 +588,18 @@
     if (s.review) {
       html += `<details open><summary>Review</summary><pre>${esc(s.review)}</pre></details>`;
     }
+    const prev = $("console");
+    const carry = prev ? prev.innerHTML : "";
     $("sess").innerHTML = html;
     $("sess").className = "";
+    if (carry) $("console").innerHTML = carry;
+    loadActivity();
     if (live) setTimeout(loadSession, 4000);
   }
 
   const esc = t => (t || "").replace(/[<>&]/g, c => ({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));
 
+  setInterval(loadActivity, 2000);
   connect(); poll(); loadNews(); loadHealth(); loadSession();
 })();
 </script>

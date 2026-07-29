@@ -65,6 +65,43 @@ class SessionRunner:
         # control group the LLM has to beat.
         self.use_stub = False
 
+    # -- activity ------------------------------------------------------------
+
+    def say(self, kind: str, message: str, *, pending: bool = False) -> int:
+        """Write one line of running commentary.
+
+        This is what the operator watches. Without it a 40-second model call and
+        a crashed process look identical from the outside, which is exactly how
+        a session was lost without anyone noticing.
+        """
+        cur = self._conn.execute(
+            "INSERT INTO activity (session_id,ts_ms,kind,message,pending) "
+            "VALUES (?,?,?,?,?)",
+            (self.session_id, self._clock.now_ms(), kind, message,
+             1 if pending else 0),
+        )
+        self._conn.commit()
+        log.info("session %s: %s", self.session_id, message)
+        return int(cur.lastrowid)
+
+    def done_saying(self, activity_id: int, message: str | None = None) -> None:
+        """Mark a pending line finished, so the UI stops counting up on it."""
+        if message:
+            self._conn.execute(
+                "UPDATE activity SET pending=0, message=? WHERE id=?",
+                (message, activity_id))
+        else:
+            self._conn.execute(
+                "UPDATE activity SET pending=0 WHERE id=?", (activity_id,))
+        self._conn.commit()
+
+    def beat(self) -> None:
+        """Prove this session is still being driven by a live process."""
+        self._conn.execute(
+            "UPDATE sessions SET heartbeat_ms=? WHERE id=?",
+            (self._clock.now_ms(), self.session_id))
+        self._conn.commit()
+
     # -- lifecycle -----------------------------------------------------------
 
     def create(self) -> int:
@@ -95,23 +132,34 @@ class SessionRunner:
         stop_opening = ends - self._cfg.flatten_before_end_minutes * 60_000
 
         self._set_status("running", started_ms=now)
-        log.info("session %s started, %dm", self.session_id, self._cfg.duration_minutes)
+        self.beat()
+        self.say("phase", f"Session started. {self._cfg.duration_minutes} minutes, "
+                          f"{self._cfg.tick_count} ticks, "
+                          f"${self._cfg.capital:,.0f}"
+                          + (" (deterministic baseline)" if self.use_stub else
+                             f" ({self._cfg.model})"))
 
         try:
             await self._plan()
 
+            tick_no = 0
             while self._clock.now_ms() < stop_opening and not self._stopped():
-                await self._tick(stop_opening)
+                tick_no += 1
+                await self._tick(stop_opening, tick_no)
                 await self._sleep_until_next_tick(stop_opening)
 
             self._set_status("flattening")
+            self.say("phase", "Session clock reached. Closing all positions.")
             self._flatten()
             await self._review()
             self._set_status("done", finished_ms=self._clock.now_ms())
+            eq = self.book.equity(self._quotes)
+            self.say("phase", f"Done. P&L ${eq - self._cfg.capital:+,.2f}")
         except Exception as exc:  # noqa: BLE001 - a session must not take the engine down
             log.exception("session %s failed", self.session_id)
             self._halted = f"{type(exc).__name__}: {exc}"
             with contextlib.suppress(Exception):
+                self.say("error", f"Session failed: {self._halted}")
                 self._flatten()
             self._set_status("failed", halt_reason=self._halted)
 
@@ -128,7 +176,7 @@ class SessionRunner:
         loss_pct = (self._cfg.capital - equity) / self._cfg.capital * 100
         if loss_pct >= self._cfg.session_loss_limit_pct:
             self._halted = f"loss limit hit: down {loss_pct:.2f}%"
-            log.warning("session %s halting: %s", self.session_id, self._halted)
+            self.say("error", f"HALTING — {self._halted}")
             return True
         return False
 
@@ -163,8 +211,11 @@ class SessionRunner:
         )
         self._conn.commit()
 
-    async def _tick(self, stop_opening_ms: int) -> None:
+    async def _tick(self, stop_opening_ms: int, tick_no: int = 0) -> None:
         remaining = max(0, (stop_opening_ms - self._clock.now_ms()) // 60_000)
+        self.beat()
+        self.say("phase",
+                 f"Tick {tick_no}/{self._cfg.tick_count} — {remaining}m left to open")
 
         if self.use_stub:
             text = stub.decide(
@@ -278,8 +329,7 @@ class SessionRunner:
                 (verdict.reason, order_id),
             )
             self._conn.commit()
-            log.info("session %s rejected %s %s %s: %s",
-                     self.session_id, side, qty, symbol, verdict.reason)
+            self.say("order", f"REJECTED {side} {qty:g} {symbol} — {verdict.reason}")
             return
 
         assert quote is not None
@@ -291,8 +341,8 @@ class SessionRunner:
         )
         self._conn.commit()
         self._snapshot_equity(now)
-        log.info("session %s filled %s %s %s @ %.2f",
-                 self.session_id, side, qty, symbol, fill.price)
+        self.say("fill", f"FILLED {side} {qty:g} {symbol} @ {fill.price:.2f} "
+                         f"(cost ${fill.cost:.2f})")
 
     def _flatten(self) -> None:
         """Close everything. can_open=False, so only reducing orders pass."""
@@ -375,12 +425,18 @@ class SessionRunner:
         decision_id = int(cur.lastrowid)
         self._conn.commit()
 
+        label = {"plan": "Asking the model for a plan",
+                 "tick": "Asking the model what to do",
+                 "review": "Asking the model to review the session"}[phase]
+        act = self.say("model", label + "…", pending=True)
+
         try:
             res = await claude.ask(
                 prompt, model=self._cfg.model, effort=self._cfg.effort,
                 session_id=self._claude_session,
             )
         except claude.ClaudeUnavailable as exc:
+            self.done_saying(act, f"Model unavailable: {exc}")
             self._conn.execute(
                 "UPDATE decisions SET error=? WHERE id=?", (str(exc), decision_id))
             self._conn.commit()
@@ -395,15 +451,30 @@ class SessionRunner:
              res.cost_usd, res.tokens_in, res.tokens_out, decision_id),
         )
         self._conn.commit()
-        return None if res.is_error else res
+
+        if res.is_error:
+            self.done_saying(act, f"Model returned an error after "
+                                  f"{res.latency_ms / 1000:.0f}s")
+            return None
+        self.done_saying(act, f"{label.replace('Asking', 'Asked')} — replied in "
+                              f"{res.latency_ms / 1000:.0f}s "
+                              f"({len(res.text):,} chars)")
+        return res
 
     async def _sleep_until_next_tick(self, stop_opening_ms: int) -> None:
         target = min(
             self._clock.now_ms() + self._cfg.policy_tick_minutes * 60_000,
             stop_opening_ms,
         )
+        secs = max(0, (target - self._clock.now_ms()) // 1000)
+        if secs <= 0:
+            return
+        act = self.say("wait", f"Waiting {secs // 60}m{secs % 60:02d}s "
+                               f"until the next tick", pending=True)
         while self._clock.now_ms() < target and not self._stopped():
+            self.beat()
             await asyncio.sleep(1.0)
+        self.done_saying(act, "Wait over")
 
     def _snapshot_equity(self, ts_ms: int) -> None:
         eq = self.book.equity(self._quotes)
