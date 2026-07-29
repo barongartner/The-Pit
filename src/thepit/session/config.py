@@ -109,6 +109,28 @@ class SessionConfig:
         return max(1, self.duration_minutes // self.policy_tick_minutes)
 
     @property
+    def model_calls(self) -> int:
+        """Total CLI invocations: one plan, one per tick, one review.
+
+        Surfaced in the UI before the session starts, because these come out of
+        the same 5-hour subscription window the operator uses for everything
+        else. A misconfigured tick interval that locks you out of your own tools
+        is a worse outcome than a bad trade, and it is entirely predictable up
+        front.
+        """
+        return self.tick_count + 2
+
+    @property
+    def estimated_latency_s(self) -> int:
+        """Wall time spent waiting on the model.
+
+        ~6s per call measured against the CLI, most of it process startup rather
+        than inference. At a 1-minute tick that is a tenth of every interval
+        spent in subprocess spawn.
+        """
+        return self.model_calls * 6
+
+    @property
     def trading_minutes(self) -> int:
         """Minutes available for opening positions, before the flatten window."""
         return max(0, self.duration_minutes - self.flatten_before_end_minutes)

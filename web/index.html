@@ -445,9 +445,14 @@
       : "<b>Cannot start.</b> " + d.readiness.missing.join("; ") + "." + warns;
     $("mft-start").disabled = !d.readiness.can_execute;
     $("mft-prompt").textContent = d.prompt;
-    $("mft-note").textContent =
-      `${d.config.policy_ticks} policy ticks · ${d.config.trading_minutes}m to open ` +
-      `positions · ${d.config.symbols.length} symbols`;
+    // Usage footprint up front. These calls come out of the same 5-hour
+    // subscription window the operator uses for everything else.
+    const heavy = d.config.model_calls > 20;
+    $("mft-note").innerHTML =
+      `${d.config.trading_minutes}m to open · ${d.config.symbols.length} symbols · ` +
+      `<span style="color:${heavy ? 'var(--down)' : 'inherit'}">` +
+      `${d.config.model_calls} model calls (~${d.config.latency_s}s waiting)</span>` +
+      (heavy ? ` — heavy on your 5-hour window` : "");
   }
 
   $("mft-preview").onclick = e => { e.preventDefault(); previewSession(); };

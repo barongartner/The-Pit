@@ -288,6 +288,8 @@ def create_app(config: cfg.Config, *, allow_control: bool) -> FastAPI:
                     "capital": cfg_obj.capital,
                     "symbols": symbols,
                     "policy_ticks": cfg_obj.tick_count,
+                    "model_calls": cfg_obj.model_calls,
+                    "latency_s": cfg_obj.estimated_latency_s,
                     "trading_minutes": cfg_obj.trading_minutes,
                     "blinding": cfg_obj.blinding.value,
                     "research": cfg_obj.research.value,
