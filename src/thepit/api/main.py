@@ -44,7 +44,9 @@ from thepit.core import calendar
 from thepit.core.clock import now_ms
 from thepit.engine.killswitch import KillSwitch
 from thepit.store import db
-from thepit.store.repos import FetchLogRepo, NewsRepo
+from thepit.session.config import Blinding, ResearchAccess, SessionConfig, SessionReadiness
+from thepit.session.prompt import build_plan_prompt
+from thepit.store.repos import BarsRepo, FetchLogRepo, NewsRepo
 
 WEB_DIR = Path(__file__).resolve().parents[3] / "web"
 
@@ -201,6 +203,56 @@ def create_app(config: cfg.Config, *, allow_control: bool) -> FastAPI:
             with contextlib.suppress(Exception):
                 c.close()
 
+    @read.post("/api/session/preview")
+    async def session_preview(payload: dict) -> JSONResponse:
+        """Resolve a session config and render the exact prompt an agent would see.
+
+        Deliberately on the READ router and deliberately named preview: it
+        touches no capital and places no orders. It exists because the prompt is
+        the highest-leverage text in the project and it should be reviewable
+        before any of the machinery that could act on it exists.
+        """
+        cfg_obj, errors = _parse_session(payload, config.symbols)
+        if errors:
+            return JSONResponse({"errors": errors}, status_code=400)
+
+        c = conn()
+        try:
+            symbols = list(cfg_obj.symbols) or config.symbols
+            # No bid/ask on the current feed, so the round-trip cost is not
+            # measurable. Passing None makes the prompt say so explicitly
+            # rather than omit it -- a missing cost reads as "free".
+            has_book = c.execute(
+                "SELECT COUNT(*) FROM ticks WHERE bid IS NOT NULL"
+            ).fetchone()[0] > 0
+
+            prompt = build_plan_prompt(
+                c, cfg_obj, symbols,
+                now_ms=now_ms(),
+                round_trip_cost_bp=None,
+            )
+            bars = BarsRepo(c)
+            readiness = _readiness(cfg_obj, symbols, bars, has_book)
+            return JSONResponse({
+                "config": {
+                    "duration_minutes": cfg_obj.duration_minutes,
+                    "capital": cfg_obj.capital,
+                    "symbols": symbols,
+                    "policy_ticks": cfg_obj.tick_count,
+                    "trading_minutes": cfg_obj.trading_minutes,
+                    "blinding": cfg_obj.blinding.value,
+                    "research": cfg_obj.research.value,
+                },
+                "readiness": {
+                    "can_execute": readiness.can_execute,
+                    "missing": readiness.missing,
+                    "warnings": readiness.warnings,
+                },
+                "prompt": prompt,
+            })
+        finally:
+            c.close()
+
     app.include_router(read)
 
     if allow_control:
@@ -228,6 +280,64 @@ def create_app(config: cfg.Config, *, allow_control: bool) -> FastAPI:
             return FileResponse(WEB_DIR / "index.html")
 
     return app
+
+
+def _parse_session(
+    payload: dict, default_symbols: list[str]
+) -> tuple[SessionConfig, list[str]]:
+    try:
+        cfg_obj = SessionConfig(
+            duration_minutes=int(payload.get("duration_minutes", 30)),
+            capital=float(payload.get("capital", 10_000)),
+            symbols=tuple(payload.get("symbols") or ()),
+            policy_tick_minutes=int(payload.get("policy_tick_minutes", 5)),
+            max_position_pct=float(payload.get("max_position_pct", 20)),
+            max_concurrent_positions=int(payload.get("max_concurrent_positions", 3)),
+            session_loss_limit_pct=float(payload.get("session_loss_limit_pct", 2)),
+            flatten_before_end_minutes=int(payload.get("flatten_before_end_minutes", 2)),
+            model=str(payload.get("model", "sonnet")),
+            effort=str(payload.get("effort", "medium")),
+            research=ResearchAccess(payload.get("research", "ambient")),
+            blinding=Blinding(payload.get("blinding", "real")),
+            run_baseline=bool(payload.get("run_baseline", True)),
+            notes=str(payload.get("notes", "")),
+        )
+    except (ValueError, TypeError) as exc:
+        return SessionConfig(), [f"malformed config: {exc}"]
+    return cfg_obj, cfg_obj.validate()
+
+
+def _readiness(
+    cfg_obj: SessionConfig, symbols: list[str], bars: BarsRepo, has_book: bool
+) -> SessionReadiness:
+    """What is missing before this session could actually trade.
+
+    Separate from config validation: "you typed something wrong" and "this part
+    of the system does not exist yet" are different failures and the UI must not
+    present them the same way.
+    """
+    missing: list[str] = []
+    warnings: list[str] = []
+
+    # Stage gates. Named explicitly so the UI never implies it can trade.
+    missing.append("fill engine and capital ledger (stage 2)")
+    missing.append("risk engine (stage 3)")
+    missing.append("policy loop / agent runtime (stage 6)")
+
+    if not has_book:
+        warnings.append(
+            "No bid/ask in the data, so the round-trip cost cannot be measured. "
+            "The prompt says so explicitly rather than implying trading is free. "
+            "Connect Alpaca (issue #11) before any cost-sensitive session."
+        )
+    thin = [s for s in symbols if len(bars.latest(s, "1m", limit=30)) < 30]
+    if thin:
+        warnings.append(
+            f"Thin bar history for {', '.join(thin[:5])}"
+            + (f" and {len(thin) - 5} more" if len(thin) > 5 else "")
+            + ". Let the recorder run longer before judging a plan built on it."
+        )
+    return SessionReadiness(can_execute=False, missing=missing, warnings=warnings)
 
 
 def _latest_quotes(

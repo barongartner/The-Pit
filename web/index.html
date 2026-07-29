@@ -77,6 +77,47 @@
   .news a:hover { color: var(--accent); }
   .empty { color: var(--dim); font-size: 13px; padding: 10px 0; }
   footer { padding: 10px 16px; border-top: 1px solid var(--line); color: var(--dim); font: 11px var(--mono); }
+
+  button {
+    font: 600 11px/1 var(--mono); letter-spacing: .1em; text-transform: uppercase;
+    background: var(--accent); color: #11130f; border: 0; border-radius: 3px;
+    padding: 7px 12px; cursor: pointer;
+  }
+  button:hover { filter: brightness(1.12); }
+  button.ghost { background: transparent; color: var(--dim); border: 1px solid var(--line); }
+  button.ghost:hover { color: var(--text); }
+  button:disabled { opacity: .4; cursor: not-allowed; filter: none; }
+
+  dialog {
+    background: var(--panel); color: var(--text); border: 1px solid var(--line);
+    border-radius: 6px; padding: 0; width: min(940px, 94vw); max-height: 88vh;
+  }
+  dialog::backdrop { background: rgba(0,0,0,.66); }
+  .dlg-head, .dlg-foot {
+    padding: 14px 18px; border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  }
+  .dlg-foot { border-bottom: 0; border-top: 1px solid var(--line); }
+  .dlg-body { padding: 16px 18px; overflow-y: auto; max-height: 62vh; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+  label { display: block; font: 11px var(--mono); color: var(--dim); margin-bottom: 4px;
+          text-transform: uppercase; letter-spacing: .08em; }
+  input, select, textarea {
+    width: 100%; background: var(--bg); color: var(--text); font: 13px var(--mono);
+    border: 1px solid var(--line); border-radius: 3px; padding: 7px 8px;
+  }
+  textarea { font: 13px -apple-system, system-ui, sans-serif; resize: vertical; }
+  .banner {
+    padding: 10px 12px; border-radius: 4px; font-size: 13px; margin-bottom: 14px;
+    background: #2a1d12; border: 1px solid #5c3d1d; color: #ffcb8a;
+  }
+  .banner b { color: #ffa94d; }
+  .banner ul { margin: 6px 0 0; padding-left: 18px; }
+  pre.prompt {
+    background: var(--bg); border: 1px solid var(--line); border-radius: 4px;
+    padding: 12px; font: 12px/1.5 var(--mono); white-space: pre-wrap;
+    max-height: 46vh; overflow-y: auto; color: #cfd4dd;
+  }
 </style>
 </head>
 <body>
@@ -89,6 +130,7 @@
   <span class="stat">close in <b id="ttc">-</b></span>
   <span class="stat"><span class="dot idle" id="ws-dot"></span><span id="ws">connecting</span></span>
   <span class="stat" id="counts"></span>
+  <span style="margin-left:auto"><button id="mft-open">MFT Session</button></span>
 </header>
 
 <main>
@@ -110,6 +152,68 @@
     <div id="health" class="empty">loading</div>
   </section>
 </main>
+
+<dialog id="mft">
+  <form method="dialog" class="dlg-head">
+    <strong style="font:600 13px/1 var(--mono);letter-spacing:.12em">MFT SESSION</strong>
+    <span class="stat">medium frequency &middot; bounded window &middot; forced flat at the end</span>
+    <span style="margin-left:auto"><button class="ghost" value="cancel">Close</button></span>
+  </form>
+
+  <div class="dlg-body">
+    <div class="banner" id="mft-banner">checking what this session can do&hellip;</div>
+
+    <div class="grid">
+      <div><label>Duration (min)</label>
+        <select id="f-duration">
+          <option>15</option><option selected>30</option><option>45</option><option>60</option>
+        </select></div>
+      <div><label>Capital ($)</label><input id="f-capital" type="number" value="10000" step="1000"></div>
+      <div><label>Policy tick (min)</label>
+        <select id="f-tick"><option>1</option><option>2</option><option selected>5</option><option>10</option></select></div>
+      <div><label>Max position (%)</label><input id="f-maxpos" type="number" value="20"></div>
+      <div><label>Max concurrent</label><input id="f-maxcon" type="number" value="3"></div>
+      <div><label>Session loss limit (%)</label><input id="f-loss" type="number" value="2" step="0.5"></div>
+      <div><label>Flatten before end (min)</label><input id="f-flat" type="number" value="2"></div>
+      <div><label>Model</label>
+        <select id="f-model"><option>haiku</option><option selected>sonnet</option><option>opus</option></select></div>
+      <div><label>Effort</label>
+        <select id="f-effort"><option>low</option><option selected>medium</option><option>high</option></select></div>
+      <div><label>Research</label>
+        <select id="f-research">
+          <option value="off">off (price only)</option>
+          <option value="ambient" selected>ambient</option>
+          <option value="ambient+requested">ambient + requested</option>
+        </select></div>
+      <div><label>Symbol identity</label>
+        <select id="f-blind">
+          <option value="real" selected>real tickers</option>
+          <option value="anonymized">anonymized</option>
+          <option value="mislabeled">mislabeled</option>
+        </select></div>
+      <div><label>Baseline alongside</label>
+        <select id="f-baseline"><option value="true" selected>yes</option><option value="false">no</option></select></div>
+    </div>
+
+    <div style="margin-top:14px">
+      <label>Universe (blank = full watchlist)</label>
+      <input id="f-symbols" placeholder="AAPL, NVDA, TSLA">
+    </div>
+    <div style="margin-top:14px">
+      <label>Operator note (context, not an override)</label>
+      <textarea id="f-notes" rows="2" placeholder="e.g. avoid anything reporting earnings today"></textarea>
+    </div>
+
+    <h2 style="margin-top:20px">Prompt the agent would receive</h2>
+    <pre class="prompt" id="mft-prompt">Press Preview.</pre>
+  </div>
+
+  <div class="dlg-foot">
+    <button id="mft-preview">Preview</button>
+    <button id="mft-start" disabled title="Needs the fill engine, risk engine and agent runtime">Start session</button>
+    <span class="stat" id="mft-note"></span>
+  </div>
+</dialog>
 
 <footer id="foot">stage 1: data layer + recorder</footer>
 
@@ -273,6 +377,68 @@
   setInterval(() => { loadNews(); loadHealth(); }, 30000);
   // Expensive and only when someone is looking: the canvas redraw.
   setInterval(() => { if (visible && selected) loadChart(selected); }, 60000);
+
+  // ---- MFT session dialogue -------------------------------------------------
+  //
+  // The Start button is disabled and will stay disabled until the fill engine,
+  // risk engine and agent runtime exist. Preview is fully functional: it renders
+  // the real prompt from real recorded bars, which is the part worth reviewing
+  // long before anything can act on it.
+  const dlg = $("mft");
+  $("mft-open").onclick = () => { dlg.showModal(); previewSession(); };
+
+  function sessionConfig() {
+    const syms = $("f-symbols").value.split(/[\s,]+/).filter(Boolean).map(s => s.toUpperCase());
+    return {
+      duration_minutes: +$("f-duration").value,
+      capital: +$("f-capital").value,
+      policy_tick_minutes: +$("f-tick").value,
+      max_position_pct: +$("f-maxpos").value,
+      max_concurrent_positions: +$("f-maxcon").value,
+      session_loss_limit_pct: +$("f-loss").value,
+      flatten_before_end_minutes: +$("f-flat").value,
+      model: $("f-model").value,
+      effort: $("f-effort").value,
+      research: $("f-research").value,
+      blinding: $("f-blind").value,
+      run_baseline: $("f-baseline").value === "true",
+      symbols: syms,
+      notes: $("f-notes").value,
+    };
+  }
+
+  async function previewSession() {
+    $("mft-prompt").textContent = "building…";
+    const r = await fetch("/api/session/preview", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(sessionConfig()),
+    });
+    const d = await r.json();
+
+    if (d.errors) {
+      $("mft-banner").innerHTML =
+        "<b>This configuration cannot run.</b><ul>" +
+        d.errors.map(e => `<li>${e}</li>`).join("") + "</ul>";
+      $("mft-prompt").textContent = "Fix the configuration above, then preview again.";
+      return;
+    }
+
+    $("mft-banner").innerHTML =
+      "<b>Preview only. This session cannot execute yet.</b> Missing: " +
+      d.readiness.missing.join("; ") + "." +
+      (d.readiness.warnings.length
+        ? "<ul>" + d.readiness.warnings.map(w => `<li>${w}</li>`).join("") + "</ul>"
+        : "");
+    $("mft-prompt").textContent = d.prompt;
+    $("mft-note").textContent =
+      `${d.config.policy_ticks} policy ticks · ${d.config.trading_minutes}m to open ` +
+      `positions · ${d.config.symbols.length} symbols`;
+  }
+
+  $("mft-preview").onclick = e => { e.preventDefault(); previewSession(); };
+  for (const id of ["f-duration","f-tick","f-research","f-blind","f-capital"]) {
+    $(id).onchange = previewSession;
+  }
 
   connect(); poll(); loadNews(); loadHealth();
 })();
