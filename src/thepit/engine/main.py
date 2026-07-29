@@ -82,12 +82,12 @@ async def run(config: cfg.Config) -> int:
 
     price_feed = AlpacaFeed(price_http, SYSTEM_CLOCK)
     if not price_feed.configured:
-        # Yahoo is blocked from this network (issue #13), so this will almost
-        # certainly report unavailable too. That is still better than silently
-        # having no price feed: probe_all() surfaces it as an event.
+        # Yahoo works fine (the earlier "blocked" diagnosis was wrong, see #13).
+        # It is the fallback rather than the default only because it has no
+        # batch endpoint and no bid/ask, so it caps the system at BARS tier.
         log.warning(
-            "Alpaca credentials not set; falling back to Yahoo, which is "
-            "blocked from this network. See issues #11 and #13."
+            "Alpaca credentials not set; using Yahoo. Works, but bars-tier only: "
+            "no bid/ask and one request per symbol. See issue #11."
         )
         price_feed = YahooChartFeed(price_http, SYSTEM_CLOCK)
 
@@ -164,10 +164,10 @@ async def _retention(
 ) -> None:
     """Prune old recordings and report disk usage.
 
-    Wired in from day one rather than added after the disk fills at 3am. This
-    machine has ~22GB free alongside large video files, so recording growth is a
-    real operational constraint, not a hypothetical: the first measured rate was
-    988MB/day, which would have filled the disk in three weeks.
+    Wired in from day one rather than added after the disk fills at 3am. The
+    first measured rate was 988MB/day, which would have filled this Mac in three
+    weeks; it is ~17MB/day now (issue #15), but the retention pass stays because
+    every later stage adds a data source.
     """
     while not stopping.is_set():
         try:
