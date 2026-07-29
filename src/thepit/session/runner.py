@@ -33,8 +33,15 @@ TICK_SCHEMA = """Return ONLY a JSON object, no prose around it:
   ]
 }
 
-An empty "orders" list is a valid and often correct answer. You are not scored
-on activity. If nothing meets your plan's criteria, return no orders."""
+You are expected to trade when a reasonable opportunity exists. You have a
+short window and finishing flat earns nothing.
+
+If you return an empty "orders" list, the "assessment" field must state exactly
+what you are waiting for and what specifically would change your mind. "No clean
+setup" is not an acceptable answer -- name the level or the condition.
+
+Equally: do not churn. Many marginal trades lose to costs. Take the best
+available opportunity, size it properly, and let it work."""
 
 
 class SessionRunner:

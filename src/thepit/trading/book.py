@@ -20,11 +20,17 @@ from thepit.core.types import FeedTier, Quote
 
 # Slippage assumed when the feed has no bid/ask.
 #
-# Yahoo gives no book at all, so there is no spread to cross and one has to be
-# assumed. 5bp each way on a liquid large cap is roughly 2-5x the real spread --
-# deliberately harsh, because the alternative (assume zero) makes every
-# high-frequency strategy look profitable and is how people lose money.
-ASSUMED_SLIPPAGE_BP = 5.0
+# Yahoo gives no book, so a spread has to be assumed. This was originally 5bp
+# each way and that was badly wrong: the real spread on a liquid large cap is
+# around 0.3bp, so 5bp was 15-30x reality. Combined with a prompt that told the
+# model to skip anything under 10bp, it made trading mathematically irrational
+# and the agent correctly sat out an entire session doing nothing.
+#
+# 1.5bp each way is ~5x the real spread on these names. Still conservative --
+# assuming zero is how every fast strategy looks profitable on paper -- but no
+# longer a hurdle that forbids trading. Revisit once Alpaca gives a real book
+# and this can be measured instead of guessed (issue #11).
+ASSUMED_SLIPPAGE_BP = 1.5
 
 # Applied on top of a real crossed spread, for latency and impact. With an LLM
 # in the loop the decision-to-order delay is seconds, not milliseconds.

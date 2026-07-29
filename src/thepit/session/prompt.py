@@ -161,6 +161,16 @@ def build_plan_prompt(
     add("Realised profit and loss over the window, after costs. Nothing else.")
     add("Not activity, not being right about direction, not a good narrative.")
     add("")
+    add("**A session that ends flat has earned nothing.** That is a failure to "
+        "find an opportunity, not prudence. You have a limited window and you "
+        "are expected to use it: find the best available trade and take it, "
+        "sized sensibly. Waiting for a perfect setup that never arrives is the "
+        "most common way to finish with zero.")
+    add("")
+    add("Standing down is permitted, but it is the last resort, not the safe "
+        "default. If you finish flat you must be able to name exactly what you "
+        "were waiting for and why nothing on the board was worth taking.")
+    add("")
 
     add("## Your costs")
     if round_trip_cost_bp is not None:
@@ -171,15 +181,23 @@ def build_plan_prompt(
             f"points** of the traded notional.")
         add(f"- At your maximum position size that is about ${cost_dollars:,.2f} "
             f"per completed trade.")
-        add("- A move smaller than that is not worth capturing. Trading more often "
-            "does not make more money; it makes more costs.")
+        add(f"- Put that in proportion: a 30bp move clears it "
+            f"{30 / max(round_trip_cost_bp, 0.1):.0f}x over. This is a floor to "
+            f"beat, not a reason to sit out. Churning many marginal trades loses "
+            f"to costs; skipping good ones loses to inaction.")
     else:
         # Never omit this. A missing cost reads as "free", which is the worst
         # available default and produces wild overtrading.
-        add("- **The round-trip cost is currently UNKNOWN.** The available price feed "
-            "has no bid/ask, so the spread you would pay cannot be measured.")
-        add("- Assume it is material. Prefer fewer, higher-conviction trades, and "
-            "treat any edge smaller than roughly 10 basis points as unprofitable.")
+        #
+        # But an over-stated cost is nearly as bad in the other direction: at
+        # 5bp/side this section made every trade look unprofitable and the agent
+        # rationally did nothing for a whole session. State the number, state
+        # that it is an estimate, and put it in proportion.
+        add("- The feed has no bid/ask, so the spread is **estimated, not "
+            "measured**: assume roughly **3 basis points per round trip**.")
+        add("- Put that in proportion: a 30bp move clears it ten times over. "
+            "This is a floor to beat, not a reason to sit out. Do not skip a "
+            "reasonable setup because of it.")
     add("")
 
     add("## Hard limits (enforced outside your control)")
@@ -249,9 +267,10 @@ def build_plan_prompt(
     add("3. **Setup** -- the specific conditions that would make you enter.")
     add("4. **Exit** -- stop and target for each, in basis points or price.")
     add("5. **Sizing** -- how large, and why that size given the volatility shown.")
-    add("6. **Stand-down conditions** -- what would make you trade nothing at all. "
-        "Doing nothing is a valid and often correct session outcome; a flat "
-        "session costs nothing, and a bad session costs real money.")
+    add("6. **Stand-down conditions** -- the specific, narrow circumstances in "
+        "which you would trade nothing at all. Be strict with yourself here: "
+        "a stand-down rule wide enough to catch an ordinary session is a way "
+        "of guaranteeing zero.")
     add("7. **Conviction (1-10)** -- how much you expect this plan to work. This is "
         "scored against outcomes across many sessions, so be honest rather than "
         "confident.")

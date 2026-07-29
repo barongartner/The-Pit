@@ -96,12 +96,20 @@ def test_blinded_prompt_leaks_no_real_ticker(conn):
 # -- the cost line, which is the point --------------------------------------
 
 
-def test_unknown_cost_is_stated_not_omitted(conn):
-    """A missing cost reads as 'free', which is the worst available default."""
+def test_unknown_cost_is_estimated_not_omitted_and_not_prohibitive(conn):
+    """Two failure modes, opposite directions.
+
+    Omitting the cost reads as "free" and produces churn. OVER-stating it makes
+    every trade look unprofitable -- which is not hypothetical: at 5bp/side plus
+    a "skip anything under 10bp" instruction, a real session did nothing at all.
+    """
     text = build_plan_prompt(conn, SessionConfig(), ["AAPL"],
                              now_ms=NOW, round_trip_cost_bp=None)
-    assert "UNKNOWN" in text
     assert "no bid/ask" in text
+    assert "estimated, not" in text
+    assert "3 basis points" in text
+    # And it must put the number in proportion rather than leaving it scary.
+    assert "not a reason to sit out" in text
 
 
 def test_known_cost_is_quoted_in_bp_and_dollars(conn):
@@ -110,7 +118,8 @@ def test_known_cost_is_quoted_in_bp_and_dollars(conn):
     assert "3.0 basis" in text
     # $10,000 x 20% max position = $2,000 notional; 3bp of that is $0.60.
     assert "$0.60" in text
-    assert "Trading more often" in text
+    # Both failure modes named, so neither reads as the safe default.
+    assert "Churning" in text and "inaction" in text
 
 
 def test_prompt_states_the_clock_and_the_forced_flatten(conn):
@@ -135,7 +144,26 @@ def test_operator_note_is_delimited_as_data(conn):
     assert "can raise the limits above" in text
 
 
-def test_standing_down_is_offered_as_a_valid_outcome(conn):
+def test_flat_session_is_framed_as_a_failure_not_prudence(conn):
+    """The regression this guards against actually happened.
+
+    The prompt used to say a flat session was "valid and often correct". The
+    agent quoted that line back in its own review as justification for making
+    zero trades in an eight-minute session. Standing down must remain possible
+    but must never read as the safe default.
+    """
     text = build_plan_prompt(conn, SessionConfig(), ["AAPL"],
                              now_ms=NOW, round_trip_cost_bp=None)
-    assert "Doing nothing is a valid" in text
+    assert "valid and often correct" not in text
+    assert "earned nothing" in text
+    assert "last resort" in text
+    assert "expected to use it" in text
+
+
+def test_tick_schema_demands_a_reason_for_inaction():
+    from thepit.session.runner import TICK_SCHEMA
+    assert "valid and often correct" not in TICK_SCHEMA
+    assert "expected to trade" in TICK_SCHEMA
+    assert "not an acceptable answer" in TICK_SCHEMA
+    # But it must still warn against the opposite failure.
+    assert "do not churn" in TICK_SCHEMA.lower()
