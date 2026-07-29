@@ -1,0 +1,281 @@
+<!doctype html>
+<!--
+  Stage 1 price page.
+
+  Deliberately plain: this is the shell that proves the data layer is alive, not
+  the dashboard. The real UI comes from the Claude Design components in Stage 9
+  (issue #12), and React arrives with it. Hand-writing a component system here
+  to throw away in three stages would be waste.
+
+  Three things are not placeholder and should survive the rewrite:
+
+    * The CHART pauses when the tab is hidden; the table does not. On a 2015
+      machine the canvas redraw heats it far more than the engine does, but
+      gating cheap work on visibility left a background tab stuck on
+      "waiting for data" forever.
+    * Quote age is on screen. A feed that stopped updating looks exactly like
+      a quiet market otherwise.
+    * The PAPER badge is loud. It gets louder in Stage 9, never quieter.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Pit</title>
+<link rel="stylesheet" href="/vendor/uPlot.min.css">
+<style>
+  :root {
+    --bg: #0c0d10; --panel: #131519; --line: #22262e;
+    --text: #e6e8ec; --dim: #7d8595; --accent: #ff9b3d;
+    --up: #2ecc84; --down: #ff5c5c;
+    --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.45 -apple-system, "Segoe UI", system-ui, sans-serif;
+  }
+  header {
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+    padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--panel);
+    position: sticky; top: 0; z-index: 10;
+  }
+  h1 { font-size: 15px; margin: 0; letter-spacing: .14em; text-transform: uppercase; }
+  .badge {
+    font: 600 11px/1 var(--mono); letter-spacing: .12em;
+    padding: 5px 9px; border-radius: 3px; text-transform: uppercase;
+  }
+  .badge.paper { background: #123a2a; color: var(--up); border: 1px solid #1d5c42; }
+  .badge.live  { background: var(--down); color: #fff; }
+  .stat { color: var(--dim); font: 12px var(--mono); }
+  .stat b { color: var(--text); font-weight: 600; }
+  .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 5px; }
+  .ok { background: var(--up); } .bad { background: var(--down); } .idle { background: var(--dim); }
+
+  main { display: grid; grid-template-columns: minmax(320px, 400px) 1fr; gap: 1px; background: var(--line); }
+  @media (max-width: 860px) { main { grid-template-columns: 1fr; } }
+  section { background: var(--bg); padding: 14px 16px; min-width: 0; }
+  h2 {
+    font: 600 11px/1 var(--mono); letter-spacing: .12em; text-transform: uppercase;
+    color: var(--dim); margin: 0 0 10px;
+  }
+
+  table { width: 100%; border-collapse: collapse; font: 13px var(--mono); }
+  th { text-align: right; color: var(--dim); font-weight: 500; padding: 4px 6px; font-size: 11px; }
+  th:first-child, td:first-child { text-align: left; }
+  td { padding: 5px 6px; text-align: right; border-top: 1px solid var(--line); }
+  tr.sel td { background: #1a1d23; }
+  tr:hover td { background: #171a20; cursor: pointer; }
+  .up { color: var(--up); } .down { color: var(--down); }
+  .stale { color: var(--down); font-size: 11px; }
+
+  #chart { min-height: 300px; }
+  .news { list-style: none; padding: 0; margin: 0; max-height: 260px; overflow-y: auto; }
+  .news li { padding: 7px 0; border-top: 1px solid var(--line); font-size: 13px; }
+  .news .m { color: var(--dim); font: 11px var(--mono); }
+  .news a { color: var(--text); text-decoration: none; }
+  .news a:hover { color: var(--accent); }
+  .empty { color: var(--dim); font-size: 13px; padding: 10px 0; }
+  footer { padding: 10px 16px; border-top: 1px solid var(--line); color: var(--dim); font: 11px var(--mono); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>The&nbsp;Pit</h1>
+  <span class="badge paper" id="mode">paper</span>
+  <span class="stat"><span class="dot idle" id="engine-dot"></span><span id="engine">engine ?</span></span>
+  <span class="stat">session <b id="session">?</b></span>
+  <span class="stat">close in <b id="ttc">-</b></span>
+  <span class="stat"><span class="dot idle" id="ws-dot"></span><span id="ws">connecting</span></span>
+  <span class="stat" id="counts"></span>
+</header>
+
+<main>
+  <section>
+    <h2>Prices</h2>
+    <table>
+      <thead><tr><th>Symbol</th><th>Last</th><th>Chg</th><th>Age</th></tr></thead>
+      <tbody id="quotes"><tr><td colspan="4" class="empty">waiting for data</td></tr></tbody>
+    </table>
+
+    <h2 style="margin-top:22px">Filings</h2>
+    <ul class="news" id="news"><li class="empty">no filings yet</li></ul>
+  </section>
+
+  <section>
+    <h2><span id="chart-sym">-</span> &middot; 1m</h2>
+    <div id="chart"></div>
+    <h2 style="margin-top:22px">Feed health &middot; 24h</h2>
+    <div id="health" class="empty">loading</div>
+  </section>
+</main>
+
+<footer id="foot">stage 1: data layer + recorder</footer>
+
+<script src="/vendor/uPlot.iife.min.js"></script>
+<script>
+(() => {
+  "use strict";
+  const $ = id => document.getElementById(id);
+  const fmt = n => n == null ? "-" : n.toFixed(2);
+
+  let quotes = new Map();
+  let selected = null;
+  let chart = null;
+  let dirty = false;
+
+  // What pauses when the tab is hidden, and what does not.
+  //
+  // Only the CHART pauses. Redrawing a canvas at animation-frame rate on 2015
+  // integrated graphics is what actually heats this machine; repainting a
+  // twelve-row table costs nothing measurable.
+  //
+  // An earlier version gated every repaint on document.hidden, which meant a
+  // page opened in a background tab -- cmd-clicked, or restored on browser
+  // launch -- sat on "waiting for data" indefinitely even though the socket was
+  // connected and receiving. Cheap work should not be conditional on someone
+  // looking at it.
+  let visible = !document.hidden;
+
+  document.addEventListener("visibilitychange", () => {
+    visible = !document.hidden;
+    if (visible) { dirty = true; if (selected) loadChart(selected); }
+  });
+
+  function renderQuotes() {
+    const tb = $("quotes");
+    if (!quotes.size) return;
+    const rows = [...quotes.values()].map(q => {
+      const cls = q.change_pct > 0 ? "up" : q.change_pct < 0 ? "down" : "";
+      const sign = q.change_pct > 0 ? "+" : "";
+      // A quote that stopped updating looks exactly like a quiet market unless
+      // the age is on screen.
+      const stale = q.age_s > 60 ? ` class="stale"` : "";
+      return `<tr data-s="${q.symbol}"${q.symbol === selected ? ' class="sel"' : ""}>
+        <td>${q.symbol}</td><td>${fmt(q.last)}</td>
+        <td class="${cls}">${q.change_pct == null ? "-" : sign + q.change_pct + "%"}</td>
+        <td${stale}>${q.age_s < 60 ? Math.round(q.age_s) + "s" : Math.round(q.age_s / 60) + "m"}</td>
+      </tr>`;
+    });
+    tb.innerHTML = rows.join("");
+    for (const tr of tb.querySelectorAll("tr[data-s]")) {
+      tr.onclick = () => { selected = tr.dataset.s; loadChart(selected); renderQuotes(); };
+    }
+  }
+
+  async function loadChart(symbol) {
+    if (!symbol) return;
+    $("chart-sym").textContent = symbol;
+    const bars = await fetch(`/api/bars/${symbol}?limit=200`).then(r => r.json());
+    if (!bars.length) { $("chart").innerHTML = '<div class="empty">no bars yet</div>'; return; }
+
+    const data = [bars.map(b => b.ts_ms / 1000), bars.map(b => b.c)];
+    const width = $("chart").clientWidth || 640;
+    if (chart) { chart.destroy(); chart = null; }
+    chart = new uPlot({
+      width, height: 300,
+      cursor: { points: { size: 5 } },
+      scales: { x: { time: true } },
+      axes: [
+        { stroke: "#7d8595", grid: { stroke: "#22262e" }, ticks: { stroke: "#22262e" } },
+        { stroke: "#7d8595", grid: { stroke: "#22262e" }, ticks: { stroke: "#22262e" } },
+      ],
+      series: [
+        {},
+        { label: symbol, stroke: "#ff9b3d", width: 1.5,
+          fill: "rgba(255,155,61,0.07)" },
+      ],
+    }, data, $("chart"));
+  }
+
+  function connect() {
+    const ws = new WebSocket(`ws://${location.host}/ws`);
+
+    ws.onopen = () => {
+      $("ws").textContent = "live";
+      $("ws-dot").className = "dot ok";
+    };
+    ws.onmessage = ev => {
+      const m = JSON.parse(ev.data);
+      if (m.type === "snapshot") {
+        quotes = new Map(m.quotes.map(q => [q.symbol, q]));
+        if (!selected && m.quotes.length) { selected = m.quotes[0].symbol; loadChart(selected); }
+        dirty = true;
+      } else if (m.type === "delta") {
+        for (const q of m.quotes) quotes.set(q.symbol, q);
+        dirty = true;
+      }
+    };
+    const down = () => {
+      $("ws").textContent = "reconnecting";
+      $("ws-dot").className = "dot bad";
+      // Fixed backoff: this is a localhost socket, so the only realistic reason
+      // it dropped is the API restarting, and that takes about a second.
+      setTimeout(connect, 2000);
+    };
+    ws.onclose = down;
+    ws.onerror = () => ws.close();
+  }
+
+  async function poll() {
+    try {
+      const s = await fetch("/api/status").then(r => r.json());
+      $("session").textContent = s.session;
+      $("ttc").textContent = s.minutes_to_close == null ? "-" : s.minutes_to_close + "m";
+      $("mode").textContent = s.mode;
+      $("mode").className = "badge " + s.mode;
+      $("engine").textContent = s.engine_alive
+        ? "engine up" : `engine down (${s.engine_heartbeat_age_s ?? "?"}s)`;
+      $("engine-dot").className = "dot " + (s.engine_alive ? "ok" : "bad");
+      $("counts").textContent =
+        `${s.counts.bars} bars · ${s.counts.ticks} ticks · ${s.counts.news} filings`;
+      if (s.kill_engaged) {
+        $("foot").textContent = "KILL SWITCH ENGAGED";
+        $("foot").style.color = "var(--down)";
+      }
+      if (!s.control_enabled) $("foot").textContent = "read-only view";
+    } catch { /* API restarting; the next tick will pick it up */ }
+  }
+
+  async function loadNews() {
+    const items = await fetch("/api/news?limit=25").then(r => r.json()).catch(() => []);
+    $("news").innerHTML = items.length ? items.map(n => {
+      const t = new Date(n.published_ms).toLocaleString([], {
+        month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+      const link = n.url ? `<a href="${n.url}" target="_blank" rel="noopener">${n.headline}</a>`
+                         : n.headline;
+      return `<li><div class="m">${t} · ${n.symbols.join(", ") || "macro"}</div>${link}</li>`;
+    }).join("") : '<li class="empty">no filings for the watchlist yet</li>';
+  }
+
+  async function loadHealth() {
+    const h = await fetch("/api/health").then(r => r.json()).catch(() => null);
+    if (!h) return;
+    const src = Object.entries(h.by_source).map(([name, s]) =>
+      `<div class="stat"><b>${name}</b> ${(s.success_rate * 100).toFixed(1)}% of ${s.total}
+       · p50 ${s.p50_ms ?? "-"}ms · p99 ${s.p99_ms ?? "-"}ms</div>`).join("");
+    const gaps = h.gaps.length
+      ? `<div class="stat" style="color:var(--down)">${h.gaps.length} gap(s) over 10min:
+         ${h.gaps.map(g => g.minutes + "m").join(", ")}</div>`
+      : `<div class="stat" style="color:var(--up)">no gaps over 10 minutes</div>`;
+    const hrs = (Date.now() - h.measured_from_ms) / 3600000;
+    const note = h.partial_window
+      ? `<div class="stat">only ${hrs.toFixed(1)}h of history; measured from first fetch</div>`
+      : "";
+    $("health").innerHTML = note + src + gaps;
+    $("health").className = "";
+  }
+
+  // Cheap and always: table repaint, status, news, health.
+  setInterval(() => { if (dirty) { renderQuotes(); dirty = false; } }, 1000);
+  setInterval(poll, 2000);
+  setInterval(() => { loadNews(); loadHealth(); }, 30000);
+  // Expensive and only when someone is looking: the canvas redraw.
+  setInterval(() => { if (visible && selected) loadChart(selected); }, 60000);
+
+  connect(); poll(); loadNews(); loadHealth();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "thepit-api",
+      "runtimeExecutable": "uv",
+      "runtimeArgs": [
+        "run",
+        "python",
+        "-m",
+        "thepit.api.main"
+      ],
+      "port": 8000,
+      "autoPort": true
+    }
+  ]
+}
