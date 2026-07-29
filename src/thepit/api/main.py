@@ -41,11 +41,14 @@ from fastapi.staticfiles import StaticFiles
 
 from thepit import config as cfg
 from thepit.core import calendar
-from thepit.core.clock import now_ms
+from thepit.core.clock import SystemClock, now_ms
 from thepit.engine.killswitch import KillSwitch
 from thepit.store import db
 from thepit.session.config import Blinding, ResearchAccess, SessionConfig, SessionReadiness
 from thepit.session.prompt import build_plan_prompt
+from thepit.session.runner import SessionRunner
+from thepit.agent import claude as claude_mod
+from thepit.core.types import FeedTier, Quote
 from thepit.store.repos import BarsRepo, FetchLogRepo, NewsRepo
 
 WEB_DIR = Path(__file__).resolve().parents[3] / "web"
@@ -203,6 +206,52 @@ def create_app(config: cfg.Config, *, allow_control: bool) -> FastAPI:
             with contextlib.suppress(Exception):
                 c.close()
 
+    @read.get("/api/sessions")
+    def sessions() -> JSONResponse:
+        c = conn()
+        try:
+            rows = c.execute(
+                "SELECT id,created_ms,started_ms,finished_ms,status,capital,cash,"
+                "halt_reason FROM sessions ORDER BY id DESC LIMIT 25").fetchall()
+            return JSONResponse([dict(r) for r in rows])
+        finally:
+            c.close()
+
+    @read.get("/api/sessions/{sid}")
+    def session_detail(sid: int) -> JSONResponse:
+        c = conn()
+        try:
+            s_row = c.execute("SELECT * FROM sessions WHERE id=?", (sid,)).fetchone()
+            if s_row is None:
+                return JSONResponse({"error": "no such session"}, status_code=404)
+
+            positions = [dict(r) for r in c.execute(
+                "SELECT * FROM positions WHERE session_id=?", (sid,))]
+            quotes = _quotes_for(c, [p["symbol"] for p in positions])
+            equity = s_row["cash"] + sum(
+                p["qty"] * quotes[p["symbol"]].last
+                for p in positions if p["symbol"] in quotes)
+
+            return JSONResponse({
+                "session": dict(s_row),
+                "equity": equity,
+                "pnl": equity - s_row["capital"],
+                "positions": positions,
+                # Rejected orders are included deliberately: "what did it want
+                # to do that it could not" is the more interesting question.
+                "orders": [dict(r) for r in c.execute(
+                    "SELECT * FROM orders WHERE session_id=? ORDER BY id DESC LIMIT 50",
+                    (sid,))],
+                "fills": [dict(r) for r in c.execute(
+                    "SELECT * FROM fills WHERE session_id=? ORDER BY id DESC LIMIT 50",
+                    (sid,))],
+                "decisions": [dict(r) for r in c.execute(
+                    "SELECT id,ts_ms,phase,response,error,latency_ms,cost_usd "
+                    "FROM decisions WHERE session_id=? ORDER BY id", (sid,))],
+            })
+        finally:
+            c.close()
+
     @read.post("/api/session/preview")
     async def session_preview(payload: dict) -> JSONResponse:
         """Resolve a session config and render the exact prompt an agent would see.
@@ -270,6 +319,52 @@ def create_app(config: cfg.Config, *, allow_control: bool) -> FastAPI:
             KillSwitch(config.state_dir).release()
             return JSONResponse({"ok": True, "engaged": False})
 
+        @control.post("/session/start")
+        async def session_start(payload: dict) -> JSONResponse:
+            cfg_obj, errors = _parse_session(payload, config.symbols)
+            if errors:
+                return JSONResponse({"errors": errors}, status_code=400)
+
+            wconn = db.connect(config.db_path)
+            symbols = list(cfg_obj.symbols) or config.symbols
+            quotes = _quotes_for(wconn, symbols)
+            if not quotes:
+                wconn.close()
+                return JSONResponse(
+                    {"errors": ["no prices available yet; let the engine run first"]},
+                    status_code=400)
+
+            runner = SessionRunner(
+                wconn, SystemClock(), cfg_obj, symbols,
+                quotes=quotes, tier=FeedTier.BARS,
+                kill=KillSwitch(config.state_dir),
+            )
+            # Fall back to the deterministic baseline when no model is
+            # reachable, rather than failing the session outright. It is the
+            # control group anyway, so running it is never wasted.
+            runner.use_stub = bool(payload.get("use_stub")) or not claude_mod.available()
+            sid = runner.create()
+
+            async def drive() -> None:
+                try:
+                    # Refresh quotes from the recorder while the session runs.
+                    # The runner never fetches; it reads what the poller wrote.
+                    async def refresh() -> None:
+                        while True:
+                            await asyncio.sleep(5)
+                            runner.update_quotes(_quotes_for(wconn, symbols))
+                    task = asyncio.create_task(refresh())
+                    try:
+                        await runner.run()
+                    finally:
+                        task.cancel()
+                finally:
+                    with contextlib.suppress(Exception):
+                        wconn.close()
+
+            asyncio.create_task(drive())
+            return JSONResponse({"session_id": sid, "status": "running"})
+
         app.include_router(control)
 
     if WEB_DIR.exists():
@@ -280,6 +375,20 @@ def create_app(config: cfg.Config, *, allow_control: bool) -> FastAPI:
             return FileResponse(WEB_DIR / "index.html")
 
     return app
+
+
+def _quotes_for(c: sqlite3.Connection, symbols: list[str]) -> dict[str, Quote]:
+    out: dict[str, Quote] = {}
+    for sym in set(symbols):
+        r = c.execute(
+            "SELECT * FROM ticks WHERE symbol=? ORDER BY ts_ms DESC LIMIT 1", (sym,)
+        ).fetchone()
+        if r:
+            out[sym] = Quote(
+                symbol=r["symbol"], ts_ms=r["ts_ms"], last=r["last"],
+                source=r["source"], received_ms=r["received_ms"],
+                bid=r["bid"], ask=r["ask"])
+    return out
 
 
 def _parse_session(
@@ -319,11 +428,10 @@ def _readiness(
     missing: list[str] = []
     warnings: list[str] = []
 
-    # Stage gates. Named explicitly so the UI never implies it can trade.
-    missing.append("fill engine and capital ledger (stage 2)")
-    missing.append("risk engine (stage 3)")
-    missing.append("policy loop / agent runtime (stage 6)")
-
+    if not claude_mod.available():
+        missing.append(
+            "the `claude` CLI is not on PATH, so no agent can be asked for a decision"
+        )
     if not has_book:
         warnings.append(
             "No bid/ask in the data, so the round-trip cost cannot be measured. "
@@ -337,7 +445,8 @@ def _readiness(
             + (f" and {len(thin) - 5} more" if len(thin) > 5 else "")
             + ". Let the recorder run longer before judging a plan built on it."
         )
-    return SessionReadiness(can_execute=False, missing=missing, warnings=warnings)
+    return SessionReadiness(can_execute=not missing, missing=missing,
+                            warnings=warnings)
 
 
 def _latest_quotes(

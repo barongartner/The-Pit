@@ -76,6 +76,17 @@
   .news a { color: var(--text); text-decoration: none; }
   .news a:hover { color: var(--accent); }
   .empty { color: var(--dim); font-size: 13px; padding: 10px 0; }
+  .kv { display: flex; gap: 18px; flex-wrap: wrap; font: 12px var(--mono); margin-bottom: 8px; }
+  .kv b { color: var(--text); font-weight: 600; }
+  .log { list-style: none; padding: 0; margin: 8px 0 0; max-height: 200px; overflow-y: auto; }
+  .log li { padding: 5px 0; border-top: 1px solid var(--line); font: 12px var(--mono); }
+  .rej { color: var(--down); }
+  details { margin-top: 8px; }
+  summary { cursor: pointer; color: var(--dim); font: 11px var(--mono);
+            text-transform: uppercase; letter-spacing: .08em; }
+  details pre { white-space: pre-wrap; font: 12px/1.5 var(--mono); color: #cfd4dd;
+                background: var(--panel); padding: 10px; border-radius: 4px;
+                max-height: 240px; overflow-y: auto; }
   footer { padding: 10px 16px; border-top: 1px solid var(--line); color: var(--dim); font: 11px var(--mono); }
 
   button {
@@ -146,7 +157,10 @@
   </section>
 
   <section>
-    <h2><span id="chart-sym">-</span> &middot; 1m</h2>
+    <h2>Session</h2>
+    <div id="sess" class="empty">no session yet &mdash; press MFT Session</div>
+
+    <h2 style="margin-top:22px"><span id="chart-sym">-</span> &middot; 1m</h2>
     <div id="chart"></div>
     <h2 style="margin-top:22px">Feed health &middot; 24h</h2>
     <div id="health" class="empty">loading</div>
@@ -423,12 +437,13 @@
       return;
     }
 
-    $("mft-banner").innerHTML =
-      "<b>Preview only. This session cannot execute yet.</b> Missing: " +
-      d.readiness.missing.join("; ") + "." +
-      (d.readiness.warnings.length
-        ? "<ul>" + d.readiness.warnings.map(w => `<li>${w}</li>`).join("") + "</ul>"
-        : "");
+    const warns = d.readiness.warnings.length
+      ? "<ul>" + d.readiness.warnings.map(w => `<li>${w}</li>`).join("") + "</ul>" : "";
+    $("mft-banner").innerHTML = d.readiness.can_execute
+      ? "<b>Paper trading.</b> No real money. Orders are simulated against recorded "
+        + "prices with an assumed spread." + warns
+      : "<b>Cannot start.</b> " + d.readiness.missing.join("; ") + "." + warns;
+    $("mft-start").disabled = !d.readiness.can_execute;
     $("mft-prompt").textContent = d.prompt;
     $("mft-note").textContent =
       `${d.config.policy_ticks} policy ticks · ${d.config.trading_minutes}m to open ` +
@@ -436,11 +451,93 @@
   }
 
   $("mft-preview").onclick = e => { e.preventDefault(); previewSession(); };
+
+  $("mft-start").onclick = async e => {
+    e.preventDefault();
+    $("mft-start").disabled = true;
+    $("mft-start").textContent = "starting…";
+    const r = await fetch("/api/control/session/start", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(sessionConfig()),
+    });
+    const d = await r.json();
+    $("mft-start").textContent = "Start session";
+    if (d.errors) {
+      $("mft-banner").innerHTML = "<b>Could not start.</b><ul>" +
+        d.errors.map(x => `<li>${x}</li>`).join("") + "</ul>";
+      $("mft-start").disabled = false;
+      return;
+    }
+    activeSession = d.session_id;
+    dlg.close();
+    loadSession();
+  };
   for (const id of ["f-duration","f-tick","f-research","f-blind","f-capital"]) {
     $(id).onchange = previewSession;
   }
 
-  connect(); poll(); loadNews(); loadHealth();
+  // ---- session panel --------------------------------------------------------
+  let activeSession = null;
+
+  async function loadSession() {
+    if (activeSession == null) {
+      const list = await fetch("/api/sessions").then(r => r.json()).catch(() => []);
+      if (!list.length) return;
+      activeSession = list[0].id;
+    }
+    const d = await fetch(`/api/sessions/${activeSession}`).then(r => r.json())
+                    .catch(() => null);
+    if (!d || d.error) return;
+
+    const s = d.session;
+    const pnlCls = d.pnl > 0 ? "up" : d.pnl < 0 ? "down" : "";
+    const live = s.status === "running" || s.status === "flattening";
+
+    const open = d.positions.filter(p => Math.abs(p.qty) > 1e-9);
+    const rejects = d.orders.filter(o => o.status === "rejected");
+    const spend = d.decisions.reduce((a, x) => a + (x.cost_usd || 0), 0);
+
+    let html = `<div class="kv">
+      <span>#${s.id} <b>${s.status}</b></span>
+      <span>equity <b>$${d.equity.toFixed(2)}</b></span>
+      <span class="${pnlCls}">P&L <b>${d.pnl >= 0 ? "+" : ""}$${d.pnl.toFixed(2)}</b></span>
+      <span>cash <b>$${s.cash.toFixed(2)}</b></span>
+      <span>tokens <b>$${spend.toFixed(3)}</b></span>
+    </div>`;
+
+    if (s.halt_reason) html += `<div class="stat down">halted: ${s.halt_reason}</div>`;
+
+    html += open.length
+      ? "<ul class='log'>" + open.map(p =>
+          `<li>${p.symbol} ${p.qty > 0 ? "+" : ""}${p.qty} @ ${p.avg_price.toFixed(2)}</li>`
+        ).join("") + "</ul>"
+      : `<div class="stat">flat</div>`;
+
+    if (d.orders.length) {
+      html += "<ul class='log'>" + d.orders.slice(0, 8).map(o =>
+        `<li class="${o.status === 'rejected' ? 'rej' : ''}">` +
+        `${o.side} ${o.qty} ${o.symbol} — ${o.status}` +
+        (o.reject_reason ? `: ${o.reject_reason}` : "") +
+        (o.reason ? `<br><span class="stat">${o.reason}</span>` : "") +
+        `</li>`).join("") + "</ul>";
+    }
+    if (rejects.length) {
+      html += `<div class="stat">${rejects.length} order(s) rejected by the risk layer</div>`;
+    }
+    if (s.plan) {
+      html += `<details><summary>Plan</summary><pre>${esc(s.plan)}</pre></details>`;
+    }
+    if (s.review) {
+      html += `<details open><summary>Review</summary><pre>${esc(s.review)}</pre></details>`;
+    }
+    $("sess").innerHTML = html;
+    $("sess").className = "";
+    if (live) setTimeout(loadSession, 4000);
+  }
+
+  const esc = t => (t || "").replace(/[<>&]/g, c => ({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));
+
+  connect(); poll(); loadNews(); loadHealth(); loadSession();
 })();
 </script>
 </body>
