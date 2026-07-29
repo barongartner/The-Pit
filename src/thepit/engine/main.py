@@ -115,6 +115,9 @@ async def run(config: cfg.Config) -> int:
         asyncio.create_task(poller.run(), name="poller"),
         asyncio.create_task(_heartbeat(switch, stopping), name="heartbeat"),
         asyncio.create_task(_watch_kill(switch, stopping), name="killwatch"),
+        asyncio.create_task(
+            _retention(recorder, config, stopping), name="retention"
+        ),
     ]
 
     log.info("engine running. Kill with: touch %s", switch.dir / "KILL")
@@ -147,6 +150,29 @@ async def _heartbeat(switch: KillSwitch, stopping: asyncio.Event) -> None:
         switch.beat()
         with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(stopping.wait(), timeout=HEARTBEAT_INTERVAL_S)
+
+
+async def _retention(
+    recorder: RawRecorder, config: cfg.Config, stopping: asyncio.Event
+) -> None:
+    """Prune old recordings and report disk usage.
+
+    Wired in from day one rather than added after the disk fills at 3am. This
+    machine has ~22GB free alongside large video files, so recording growth is a
+    real operational constraint, not a hypothetical: the first measured rate was
+    988MB/day, which would have filled the disk in three weeks.
+    """
+    while not stopping.is_set():
+        try:
+            freed = recorder.prune_older_than(config.raw_retention_days)
+            used = recorder.disk_usage_bytes()
+            if freed:
+                log.info("retention: freed %.1f MB", freed / 1e6)
+            log.info("recordings on disk: %.1f MB", used / 1e6)
+        except Exception as exc:  # noqa: BLE001 - housekeeping is never fatal
+            log.warning("retention pass failed: %s", exc)
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(stopping.wait(), timeout=3600)
 
 
 async def _watch_kill(switch: KillSwitch, stopping: asyncio.Event) -> None:

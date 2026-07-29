@@ -100,7 +100,18 @@ class YahooChartFeed:
             res = await self._http.get(
                 CHART_URL.format(symbol=symbol),
                 source=self.name, kind="quote", symbols=(symbol,),
-                params={"range": "1d", "interval": "1m"},
+                # interval=1d, NOT 1m.
+                #
+                # A quote needs exactly one number: meta.regularMarketPrice.
+                # Both intervals return it, but `1m` also carries the whole
+                # day's minute bars -- 20,753 bytes versus 1,189, a 17.5x tax
+                # paid every five seconds per symbol. Measured against the live
+                # endpoint: that alone was ~1GB/day of recording, or 361GB/year,
+                # on a machine with 22GB free.
+                params={"range": "1d", "interval": "1d"},
+                # One in twelve: roughly one recorded quote snapshot per symbol
+                # per minute, which is the same cadence the bars path runs at.
+                sample_raw=12,
             )
             records.append(res.record)
             if not res.ok or res.text is None:

@@ -39,7 +39,13 @@ class PollerConfig:
     # Closed markets still move (pre/post, futures, news), but not enough to
     # justify the same cadence. This also keeps the machine cool overnight.
     quote_interval_closed_s: float = 300.0
-    bar_interval_s: float = 60.0
+    # 5 minutes, not 1. Each bars fetch returns the ENTIRE day of 1-minute
+    # candles, so a 60s cadence re-downloads the same ~20KB payload five times
+    # over for one new bar. At 300s no bar is ever missed -- the most recent one
+    # is just up to five minutes late, which is irrelevant for a system whose
+    # policy loop runs in minutes. Measured: this is the difference between
+    # ~150MB/day and ~40MB/day of recording.
+    bar_interval_s: float = 300.0
     bar_timeframe: str = "1m"
     bar_limit: int = 100
     # Form 4's firehose window is ~54 minutes; 10 minutes gives ~5x headroom.

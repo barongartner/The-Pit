@@ -51,7 +51,7 @@ class Config:
 
     quote_interval_open_s: float = 5.0
     quote_interval_closed_s: float = 300.0
-    bar_interval_s: float = 60.0
+    bar_interval_s: float = 300.0
     news_interval_s: float = 600.0
 
     raw_recording: bool = True
@@ -109,7 +109,7 @@ def load(path: Path | None = None, *, mode: Mode = Mode.PAPER) -> Config:
         lan_port=int(api.get("lan_port", 8001)),
         quote_interval_open_s=float(feed.get("quote_interval_open_s", 5.0)),
         quote_interval_closed_s=float(feed.get("quote_interval_closed_s", 300.0)),
-        bar_interval_s=float(feed.get("bar_interval_s", 60.0)),
+        bar_interval_s=float(feed.get("bar_interval_s", 300.0)),
         news_interval_s=float(feed.get("news_interval_s", 600.0)),
         raw_recording=bool(raw.get("raw_recording", True)),
         raw_retention_days=int(raw.get("raw_retention_days", 90)),
