@@ -154,7 +154,7 @@ def build_plan_prompt(
         f"minutes before the end, whether or not you want to be.")
     add(f"- You will be asked to revise this plan every {config.policy_tick_minutes} "
         f"minutes ({config.tick_count} times).")
-    add(f"- Capital for this session: ${config.capital:,.0f}")
+    add(f"- Capital for this session: ${config.capital:,.2f}")
     add("")
 
     add("## What determines whether you succeed")
@@ -200,8 +200,16 @@ def build_plan_prompt(
             "reasonable setup because of it.")
     add("")
 
+    max_pos = config.capital * config.max_position_pct / 100
     add("## Hard limits (enforced outside your control)")
-    add(f"- Maximum position: {config.max_position_pct:.0f}% of session capital")
+    add(f"- Maximum position: {config.max_position_pct:.0f}% of session capital "
+        f"= **${max_pos:,.2f} per symbol**")
+    # Percentages alone are useless on a small account: 20% of $20 is $4, and
+    # every name on the board costs more than that per share. Without the dollar
+    # figure and the fractional permission the agent proposes whole shares it
+    # cannot afford and every order is rejected.
+    add("- **Fractional shares are allowed.** Quantities may be decimals. "
+        f"At ${max_pos:,.2f} that is how you take a position in a $200 stock.")
     add(f"- Maximum concurrent positions: {config.max_concurrent_positions}")
     add(f"- Session loss limit: {config.session_loss_limit_pct:.1f}% -- breaching this "
         f"halts the session immediately")

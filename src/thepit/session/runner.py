@@ -29,9 +29,11 @@ TICK_SCHEMA = """Return ONLY a JSON object, no prose around it:
 {
   "assessment": "<=200 chars on what changed since your plan",
   "orders": [
-    {"symbol":"AAPL","side":"buy","qty":10,"reason":"<=120 chars","conviction":7}
+    {"symbol":"AAPL","side":"buy","qty":0.0125,"reason":"<=120 chars","conviction":7}
   ]
 }
+
+"qty" may be fractional -- decimals are expected on a small account.
 
 You are expected to trade when a reasonable opportunity exists. You have a
 short window and finishing flat earns nothing.
@@ -227,7 +229,9 @@ class SessionRunner:
         if self.use_stub:
             text = stub.decide(
                 self._conn, self._symbols, self._quotes,
-                {s: p.qty for s, p in self.book.positions.items()})
+                {s: p.qty for s, p in self.book.positions.items()},
+                budget=self.book.equity(self._quotes)
+                       * self._cfg.max_position_pct / 100 * 0.9)
             self._conn.execute(
                 "INSERT INTO decisions (session_id,ts_ms,phase,prompt,response,parsed)"
                 " VALUES (?,?,'tick','(deterministic baseline)',?,?)",
@@ -403,6 +407,8 @@ class SessionRunner:
             "",
             f"Cash ${self.book.cash:,.2f} | Equity ${eq:,.2f} | "
             f"P&L ${pnl:+,.2f} ({pnl / self._cfg.capital * 100:+.2f}%)",
+            f"Max position ${eq * self._cfg.max_position_pct / 100:,.2f} per symbol. "
+            f"Fractional quantities allowed.",
             "",
         ]
 

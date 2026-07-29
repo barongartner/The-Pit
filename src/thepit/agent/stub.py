@@ -49,6 +49,7 @@ def decide(
     symbols: list[str],
     quotes: dict[str, Quote],
     positions: dict[str, float],
+    budget: float = 1500.0,
 ) -> str:
     """Return the same JSON shape an LLM tick returns."""
     orders: list[dict] = []
@@ -81,10 +82,12 @@ def decide(
             symbol, move = ranked[0]
             quote = quotes.get(symbol)
             if quote:
-                # Size to roughly 15% of a nominal book; the risk layer holds
-                # the real ceiling, and this must sit under it or every tick
-                # produces a rejection instead of a trade.
-                qty = max(1, int(1500 / quote.last))
+                # Sized from the caller's budget; the risk layer holds the real
+                # ceiling, and this must sit under it or every tick produces a
+                # rejection instead of a trade.
+                # Fractional. Whole shares are unbuyable on a small account:
+                # int(4 / 194) is 0, and the session silently never trades.
+                qty = round(budget / quote.last, 6)
                 orders.append({
                     "symbol": symbol, "side": "buy", "qty": qty, "conviction": 4,
                     "reason": f"strongest 5m move, {move:+.0f}bp",
