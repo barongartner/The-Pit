@@ -31,6 +31,7 @@ from thepit.engine.poller import Poller, PollerConfig
 from thepit.feeds import edgar as edgar_mod
 from thepit.feeds.alpaca import AlpacaFeed
 from thepit.feeds.edgar import EdgarNewsFeed
+from thepit.feeds import http as feed_http_mod
 from thepit.feeds.http import FeedHttp
 from thepit.feeds.recorder import RawRecorder
 from thepit.feeds.yahoo import YahooChartFeed
@@ -76,6 +77,7 @@ async def run(config: cfg.Config) -> int:
     news_http = FeedHttp(
         SYSTEM_CLOCK, recorder,
         min_interval_s=edgar_mod.MIN_REQUEST_INTERVAL_S,
+        timeout=feed_http_mod.SLOW_TIMEOUT,
     )
 
     price_feed = AlpacaFeed(price_http, SYSTEM_CLOCK)

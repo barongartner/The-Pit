@@ -48,6 +48,13 @@ def has_contact() -> bool:
 
 DEFAULT_TIMEOUT = httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0)
 
+# SEC serves an 800KB ticker map and multi-hundred-KB atom feeds, and its p50 is
+# already ~1.8s. A 10s read timeout hit exactly that ceiling on the first live
+# run (ReadTimeout at 10004ms). The failure was handled correctly -- recorded in
+# fetch_log, feed degraded gracefully, recovered on the next cycle -- but the
+# limit was simply wrong for the payload rather than a signal about SEC.
+SLOW_TIMEOUT = httpx.Timeout(connect=5.0, read=30.0, write=5.0, pool=5.0)
+
 
 @dataclass(frozen=True, slots=True)
 class FetchResult:
