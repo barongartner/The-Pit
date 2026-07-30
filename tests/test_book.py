@@ -140,7 +140,7 @@ def test_kill_switch_beats_everything(book):
     assert not _check(book, killed=True).ok
 
 
-def test_rejects_when_halted(book):
+def test_rejects_opening_when_halted(book):
     assert not _check(book, halted=True).ok
 
 
@@ -193,6 +193,25 @@ def test_reducing_is_allowed_past_the_clock_and_the_loss_limit(book):
     fill(book, "AAPL", "buy", 50, 100.0)
     v = _check(book, side="sell", qty=50, can_open=False, equity=9_000)
     assert v.ok, f"could not close a position: {v.reason}"
+
+
+def test_reducing_is_allowed_while_halted(book):
+    """The bug this pins: `halted` sat above the de-risking bypass, so the loss
+    limit locked the losing position open. Every closing order for the rest of
+    the window was rejected as 'session halted' by the control whose entire
+    purpose was to stop the bleeding."""
+    fill(book, "AAPL", "buy", 50, 100.0)
+    v = _check(book, side="sell", qty=50, halted=True)
+    assert v.ok, f"a halted session could not close its position: {v.reason}"
+
+
+def test_the_kill_switch_still_blocks_even_a_reducing_order(book):
+    """It is the brake. It stops everything, including de-risking, and the
+    callers that need to unwind afterwards say so out loud instead of being
+    quietly exempted."""
+    fill(book, "AAPL", "buy", 50, 100.0)
+    v = _check(book, side="sell", qty=50, killed=True)
+    assert not v.ok and "kill switch" in v.reason
 
 
 def test_risk_verdict_cannot_carry_a_modified_order():

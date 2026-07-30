@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from dataclasses import dataclass
 
 from thepit.core.types import Bar, FetchRecord, NewsItem, Quote
 
@@ -262,6 +263,79 @@ class FetchLogRepo:
         if until_ms - prev > max_gap_ms:
             out.append((prev, until_ms))
         return out
+
+
+class SessionsRepo:
+    """Reads a session's money. One place, on purpose.
+
+    **P&L is never `cash - capital`.** While a position is open that difference is
+    just the money currently sitting in stock, and it reads as a catastrophic
+    loss: an interrupted session holding 8 NVDA showed "-$3,060" when its actual
+    P&L was -$1.97. Two separate ad-hoc queries made that mistake, and a third
+    copy of the calculation existed in the API until this class replaced it.
+
+    P&L = (cash + positions marked to market) - starting capital.
+
+    `open_qty` matters as much as the number: a session still holding something
+    has an *unrealised* P&L, and reporting it next to a closed session's realised
+    figure without saying so is how a paper result flatters itself.
+    """
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self._conn = conn
+
+    def marks(self) -> dict[str, float]:
+        """Latest traded price per symbol. The mark, not a mid: there is no book."""
+        return {
+            r["symbol"]: r["last"] for r in self._conn.execute(
+                "SELECT t.symbol, t.last FROM ticks t JOIN "
+                "(SELECT symbol s, MAX(ts_ms) m FROM ticks GROUP BY symbol) x "
+                "ON x.s = t.symbol AND x.m = t.ts_ms")
+        }
+
+    def positions(self, session_id: int) -> list[sqlite3.Row]:
+        return self._conn.execute(
+            "SELECT symbol, qty, avg_price, realized FROM positions "
+            "WHERE session_id=? AND ABS(qty) > 1e-9", (session_id,)).fetchall()
+
+    def pnl(self, session_id: int, marks: dict[str, float] | None = None) -> SessionPnL:
+        row = self._conn.execute(
+            "SELECT capital, cash FROM sessions WHERE id=?", (session_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"no session {session_id}")
+        marks = self.marks() if marks is None else marks
+
+        positions = self.positions(session_id)
+        # Falling back to the entry price when a symbol has no tick keeps the
+        # arithmetic honest rather than valuing the position at zero, which would
+        # invent a total loss out of a missing quote.
+        held = sum(p["qty"] * marks.get(p["symbol"], p["avg_price"]) for p in positions)
+        equity = row["cash"] + held
+        return SessionPnL(
+            session_id=session_id, capital=row["capital"], cash=row["cash"],
+            positions_value=held, equity=equity, pnl=equity - row["capital"],
+            open_qty={p["symbol"]: p["qty"] for p in positions},
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class SessionPnL:
+    session_id: int
+    capital: float
+    cash: float
+    positions_value: float
+    equity: float
+    pnl: float
+    open_qty: dict[str, float]
+
+    @property
+    def realised(self) -> bool:
+        """False while anything is still open, which changes what the number means."""
+        return not self.open_qty
+
+    @property
+    def pnl_pct(self) -> float:
+        return self.pnl / self.capital * 100 if self.capital else 0.0
 
 
 class EventsRepo:

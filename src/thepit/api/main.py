@@ -51,7 +51,7 @@ from thepit.session.prompt import build_plan_prompt
 from thepit.session.runner import SessionRunner
 from thepit.agent import claude as claude_mod
 from thepit.core.types import FeedTier, Quote
-from thepit.store.repos import BarsRepo, FetchLogRepo, NewsRepo
+from thepit.store.repos import BarsRepo, FetchLogRepo, NewsRepo, SessionsRepo
 
 WEB_DIR = Path(__file__).resolve().parents[3] / "web"
 
@@ -62,9 +62,13 @@ PUSH_INTERVAL_S = 1.0
 
 
 # A session whose heartbeat is older than this is not being driven by anything.
-# Generous: the runner beats every second while waiting, but a long model call
-# can block the loop for the better part of a minute.
-SESSION_STALE_S = 120
+#
+# It MUST outlast the slowest thing a live session can legitimately be doing,
+# which is one model call: 180s of timeout plus a 15s drain. At 120s the reaper
+# marked healthy sessions 'interrupted' mid-call and overwrote their halt reason
+# while the task was still running. The runner also beats every second through a
+# model call now; this margin is the belt to that braces.
+SESSION_STALE_S = int(claude_mod.TIMEOUT_S + claude_mod.KILL_DRAIN_S + 60)
 
 
 def _reap_orphans(config: cfg.Config) -> int:
@@ -81,17 +85,36 @@ def _reap_orphans(config: cfg.Config) -> int:
     conn = db.connect(config.db_path)
     try:
         now = now_ms()
-        cur = conn.execute(
-            "UPDATE sessions SET status='halted', "
-            "halt_reason=COALESCE(halt_reason,"
-            "'interrupted: the process driving this session stopped'), "
-            "finished_ms=? "
-            "WHERE status IN ('running','flattening') "
-            "AND (heartbeat_ms IS NULL OR heartbeat_ms < ?)",
-            (now, now - SESSION_STALE_S * 1000),
-        )
-        conn.commit()
-        return cur.rowcount
+        cutoff = now - SESSION_STALE_S * 1000
+        dead = [r["id"] for r in conn.execute(
+            "SELECT id FROM sessions WHERE "
+            "(status IN ('running','flattening') "
+            "  AND (heartbeat_ms IS NULL OR heartbeat_ms < ?)) "
+            # 'planned' is included because a task that dies during the planning
+            # call never reaches 'running' and never beats, so the row sat at
+            # 'planned' forever with nothing able to notice. Gated on age so a
+            # session created milliseconds ago is not reaped before it starts.
+            "OR (status='planned' AND created_ms < ?)", (cutoff, cutoff))]
+        if not dead:
+            return 0
+
+        marks = ",".join("?" * len(dead))
+        with db.immediate(conn):
+            conn.execute(
+                "UPDATE sessions SET status='halted', "
+                "halt_reason=COALESCE(halt_reason,"
+                "'interrupted: the process driving this session stopped'), "
+                f"finished_ms=? WHERE id IN ({marks})", (now, *dead))
+            # Nothing is enforcing these any more -- the process that would have
+            # was the one that died. Leaving them 'active' told the dashboard a
+            # stop was being watched when no code was watching anything.
+            conn.execute(
+                f"UPDATE exit_plans SET status='closed', updated_ms=? "
+                f"WHERE session_id IN ({marks}) AND status='active'", (now, *dead))
+            conn.execute(
+                f"UPDATE pending_entries SET status='cancelled', resolved_ms=? "
+                f"WHERE session_id IN ({marks}) AND status='waiting'", (now, *dead))
+        return len(dead)
     finally:
         conn.close()
 
@@ -251,12 +274,30 @@ def create_app(config: cfg.Config, *, allow_control: bool) -> FastAPI:
 
     @read.get("/api/sessions")
     def sessions() -> JSONResponse:
+        # Reaped here too, not only in the detail view. This is the endpoint the
+        # scoreboard reads, and a dead session that still says 'running' with
+        # nothing marking it is how two sessions were lost unnoticed.
+        if allow_control:
+            _reap_orphans(config)
         c = conn()
         try:
             rows = c.execute(
                 "SELECT id,created_ms,started_ms,finished_ms,status,capital,cash,"
-                "halt_reason FROM sessions ORDER BY id DESC LIMIT 25").fetchall()
-            return JSONResponse([dict(r) for r in rows])
+                "halt_reason,heartbeat_ms FROM sessions ORDER BY id DESC LIMIT 25"
+            ).fetchall()
+            now = now_ms()
+            out = []
+            for r in rows:
+                d = dict(r)
+                # Computed rather than written, so a read-only listener that
+                # cannot reap still shows the truth.
+                d["alive"] = bool(
+                    r["status"] in ("running", "flattening")
+                    and r["heartbeat_ms"] is not None
+                    and now - r["heartbeat_ms"] <= SESSION_STALE_S * 1000
+                )
+                out.append(d)
+            return JSONResponse(out)
         finally:
             c.close()
 
@@ -284,10 +325,10 @@ def create_app(config: cfg.Config, *, allow_control: bool) -> FastAPI:
 
             positions = [dict(r) for r in c.execute(
                 "SELECT * FROM positions WHERE session_id=?", (sid,))]
-            quotes = _quotes_for(c, [p["symbol"] for p in positions])
-            equity = s_row["cash"] + sum(
-                p["qty"] * quotes[p["symbol"]].last
-                for p in positions if p["symbol"] in quotes)
+            # The shared calculation, not a third local copy of it. The two
+            # earlier ad-hoc versions are what produced a "-$3,060" P&L on a
+            # session that was down $1.97.
+            money = SessionsRepo(c).pnl(sid)
 
             stale = (
                 s_row["status"] in ("running", "flattening")
@@ -297,8 +338,11 @@ def create_app(config: cfg.Config, *, allow_control: bool) -> FastAPI:
             return JSONResponse({
                 "session": dict(s_row),
                 "alive": not stale,
-                "equity": equity,
-                "pnl": equity - s_row["capital"],
+                "equity": money.equity,
+                "pnl": money.pnl,
+                # False while anything is open, which changes what the number
+                # means. The UI says so rather than leaving it to be assumed.
+                "pnl_realised": money.realised,
                 "positions": positions,
                 # What Python is enforcing right now, and what it is waiting on.
                 # Both are the answer to "why did that close by itself", which is
@@ -399,6 +443,17 @@ def create_app(config: cfg.Config, *, allow_control: bool) -> FastAPI:
             cfg_obj, errors = _parse_session(payload, config.symbols)
             if errors:
                 return JSONResponse({"errors": errors}, status_code=400)
+
+            switch = KillSwitch(config.state_dir)
+            if switch.engaged():
+                # Otherwise it reports 'running', spends a plan call plus a tick
+                # call per interval against the shared rate window, and has every
+                # single order rejected. Releasing the kill is a deliberate human
+                # act; so is starting a session into it.
+                return JSONResponse(
+                    {"errors": [f"the kill switch is engaged: "
+                                f"{switch.dir / 'KILL'}. Release it first."]},
+                    status_code=409)
 
             wconn = db.connect(config.db_path)
             symbols = list(cfg_obj.symbols) or config.symbols

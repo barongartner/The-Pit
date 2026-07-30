@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from thepit.core.types import FeedTier, Quote
+from thepit.store import db
 
 # Slippage assumed when the feed has no bid/ask.
 #
@@ -125,12 +126,42 @@ class Book:
             self.cash = row["cash"]
 
     def equity(self, prices: dict[str, Quote]) -> float:
+        """Cash plus positions marked to market.
+
+        A position with no quote is valued at its **cost**, not at zero. Skipping
+        it dropped its whole value out of equity, which read as a near-total loss
+        and tripped the session loss limit off nothing but a missing tick -- and
+        the quote dict is replaced wholesale every five seconds, so a symbol
+        going briefly absent is ordinary rather than exotic.
+
+        Valuing at cost is not a mark, it is a refusal to invent one. Callers that
+        must know whether the book is really markable ask :meth:`unpriced`.
+        """
         total = self.cash
         for sym, pos in self.positions.items():
             q = prices.get(sym)
-            if q:
-                total += pos.value(q.last)
+            total += pos.value(q.last if q else pos.avg_price)
         return total
+
+    def unpriced(self, prices: dict[str, Quote], *, now_ms: int | None = None,
+                 max_age_s: float | None = None) -> list[str]:
+        """Open symbols that cannot honestly be marked right now.
+
+        Missing, or older than `max_age_s` when a clock is supplied. Any risk
+        decision taken while this is non-empty is being taken on a number nobody
+        can stand behind.
+        """
+        out: list[str] = []
+        for sym, pos in self.positions.items():
+            if abs(pos.qty) < 1e-9:
+                continue
+            q = prices.get(sym)
+            if q is None:
+                out.append(sym)
+            elif now_ms is not None and max_age_s is not None \
+                    and (now_ms - q.received_ms) / 1000 > max_age_s:
+                out.append(sym)
+        return out
 
     def open_count(self) -> int:
         return sum(1 for p in self.positions.values() if abs(p.qty) > 1e-9)
@@ -165,7 +196,12 @@ class Book:
         self.positions[fill.symbol] = new
         self.cash += cash_delta
 
-        with self._conn:
+        # BEGIN IMMEDIATE, not `with self._conn:`. The connections this project
+        # opens set isolation_level=None, which turns the connection context
+        # manager into a no-op: each of the three statements below committed on
+        # its own, so a crash between them left cash and positions describing
+        # different books, with the fill row possibly absent from both.
+        with db.immediate(self._conn):
             self._conn.execute(
                 "INSERT INTO fills (order_id,session_id,ts_ms,symbol,side,qty,price,"
                 "ref_price,cost,sim_tier) VALUES (?,?,?,?,?,?,?,?,?,?)",
@@ -249,13 +285,19 @@ def check(
     Checks run cheapest-and-most-absolute first, so a killed system rejects fast
     and the reason for any rejection is deterministic.
 
-    Reducing an existing position is always allowed past the size and clock
-    checks. A risk control that prevents de-risking is not a risk control.
+    Reducing an existing position is always allowed past the size, clock and
+    halt checks. A risk control that prevents de-risking is not a risk control --
+    and `halted` used to sit above that bypass, which meant the session loss
+    limit locked the losing position open: every closing order for the rest of
+    the window was rejected as "session halted" by the very control whose job was
+    to stop the bleeding.
+
+    The kill switch stays absolute. It is the brake, it is meant to stop
+    everything including this, and the callers that need to unwind a position
+    afterwards handle it explicitly rather than being quietly exempted here.
     """
     if killed:
         return Verdict(False, Reject.KILLED)
-    if halted:
-        return Verdict(False, Reject.HALTED)
     if qty <= 0:
         return Verdict(False, Reject.BAD_QTY)
     if quote is None:
@@ -275,6 +317,8 @@ def check(
     reducing = abs(projected) < abs(current_qty)
 
     if not reducing:
+        if halted:
+            return Verdict(False, Reject.HALTED)
         if not can_open:
             return Verdict(False, Reject.CLOCK)
 

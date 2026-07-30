@@ -54,6 +54,18 @@ Terseness is a hard requirement: your output consumes a shared rate limit, and
 the engine reads only the fields it asked for."""
 
 
+# How long one turn may take before the process tree is killed.
+#
+# Exported rather than left as a default argument because the session reaper has
+# to outlast it: a session whose only heartbeat is between ticks looks dead for
+# the whole length of a slow model call, and something that marks it 'interrupted'
+# on a shorter timer will kill a session that is working perfectly.
+TIMEOUT_S = 180.0
+
+# Grace period after the kill signal, for the output pipe to drain.
+KILL_DRAIN_S = 15.0
+
+
 class ClaudeUnavailable(RuntimeError):
     """The CLI is not installed or not reachable."""
 
@@ -113,7 +125,7 @@ async def ask(
     model: str = "sonnet",
     effort: str = "medium",
     session_id: str | None = None,
-    timeout_s: float = 180.0,
+    timeout_s: float = TIMEOUT_S,
     system: str | None = TERSE_SYSTEM,
 ) -> ClaudeResult:
     """Run one turn. Blocking subprocess, moved off the event loop."""
@@ -168,7 +180,7 @@ def _run(
     except subprocess.TimeoutExpired:
         _kill_tree(proc)
         try:
-            out, err = proc.communicate(timeout=15)
+            out, err = proc.communicate(timeout=KILL_DRAIN_S)
         except subprocess.TimeoutExpired:
             out, err = "", "timed out and would not die"
         return ClaudeResult(

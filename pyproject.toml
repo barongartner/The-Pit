@@ -41,7 +41,14 @@ packages = ["src/thepit"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-filterwarnings = ["error"]
+# Warnings are errors, with one exception: starlette's TestClient warns that it
+# wants httpx2 instead of httpx. Taking that advice would mean a fourth runtime
+# dependency to test a dashboard, so the warning is silenced here rather than
+# weakening the policy or skipping the API tests.
+filterwarnings = [
+    "error",
+    "ignore:Using `httpx` with `starlette.testclient`:",
+]
 
 [tool.ruff]
 line-length = 100

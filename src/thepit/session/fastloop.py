@@ -42,7 +42,7 @@ from dataclasses import dataclass, replace
 from thepit.core.clock import Clock
 from thepit.core.types import Quote
 from thepit.trading import levels as lv
-from thepit.trading.book import Fill
+from thepit.trading.book import Fill, Position
 
 log = logging.getLogger("thepit.fastloop")
 
@@ -88,7 +88,9 @@ class FastLoop:
         session_id: int,
         *,
         quotes: Callable[[], dict[str, Quote]],
-        positions: Callable[[], dict[str, float]],
+        # The book's positions, not just quantities: a plan's risk reference is
+        # the position's blended cost, which only the book knows.
+        positions: Callable[[], dict[str, Position]],
         submit: SubmitFn,
         say: SayFn,
         interval_s: float = 5.0,
@@ -118,6 +120,11 @@ class FastLoop:
         Called immediately after an opening fill. The fill price, not the quote
         the decision was made on, is the reference -- otherwise a 15bp stop is
         measured from a price nobody traded at.
+
+        Adding to a position is not the same as opening one. The plan row is keyed
+        by symbol, so a second fill used to overwrite it wholesale: the ratcheted
+        trailing stop retreated to wherever the new levels put it, and the
+        high-water mark reset to the latest clip. Both are carried forward here.
         """
         plan, error = lv.resolve(
             levels, symbol=symbol, side=side, entry_price=entry_price,
@@ -125,6 +132,20 @@ class FastLoop:
         )
         if plan is None:
             return None, error
+
+        prior = self.plan(symbol)
+        if prior is not None and prior.long == plan.long:
+            plan = replace(
+                plan,
+                high_water=max(prior.high_water, plan.high_water) if plan.long
+                else min(prior.high_water, plan.high_water),
+                trail_bp=plan.trail_bp if plan.trail_bp is not None
+                else prior.trail_bp,
+            )
+            # Re-apply the ratchet, so an add cannot loosen a stop the trail had
+            # already tightened.
+            plan = plan.trailed(plan.high_water)
+
         self._write(plan)
         self._say("levels", self.describe(plan))
         return plan, None
@@ -170,6 +191,9 @@ class FastLoop:
             time_stop_ms=plan.time_stop_ms if levels.time_stop_minutes is not None
             else current.time_stop_ms,
         )
+        # Re-apply the ratchet. An amendment may tighten a trailed stop; it must
+        # not be a way to loosen one back to a level the trail already passed.
+        plan = plan.trailed(plan.high_water)
         self._write(plan)
         self._say("levels", "REVISED " + self.describe(plan))
         return plan, None
@@ -293,7 +317,8 @@ class FastLoop:
         self.ticks += 1
 
         for plan in self.plans():
-            qty = positions.get(plan.symbol, 0.0)
+            held = positions.get(plan.symbol)
+            qty = held.qty if held else 0.0
             if abs(qty) < 1e-9:
                 # Closed by the model, by the flatten, or by an earlier pass.
                 self._close_plan(plan.symbol, now)
@@ -305,8 +330,11 @@ class FastLoop:
 
             hit = lv.breached(plan, price, now)
             if hit is not None:
-                self._fire(plan, hit, qty, now)
-                acted.append(f"{hit.kind}:{plan.symbol}")
+                done = self._fire(plan, hit, qty, now)
+                # A failed fire is reported distinctly. "stop:AAPL" must never
+                # mean "tried to stop out and could not".
+                acted.append(f"{hit.kind}:{plan.symbol}" if done
+                             else f"{hit.kind}-blocked:{plan.symbol}")
                 continue
 
             moved = plan.trailed(price)
@@ -357,7 +385,8 @@ class FastLoop:
         self._stale.discard(symbol)
         return quote.last
 
-    def _fire(self, plan: lv.ExitPlan, hit: lv.Breach, qty: float, now: int) -> None:
+    def _fire(self, plan: lv.ExitPlan, hit: lv.Breach, qty: float, now: int) -> bool:
+        """Execute a breached level. False means the position is still open."""
         self._say("order", f"{plan.symbol} {hit.kind.upper()} — {hit.detail}")
         # can_open=False: this is always a reduction, and it must pass even after
         # the clock has closed for new positions.
@@ -366,17 +395,21 @@ class FastLoop:
              "reason": f"fast loop {hit.kind}: {hit.detail}"[:200]},
             can_open=False,
         )
+        if fill is None:
+            # The plan stays ACTIVE. Marking it fired here was worse than the
+            # rejection: the only thing watching the position was deleted, so a
+            # kill switch or a stale quote for one interval permanently ended
+            # enforcement on a position that was already through its stop.
+            self._say("error", f"{plan.symbol} {hit.kind} could not be executed — "
+                               f"position is still open. Retrying every "
+                               f"{self.interval_s:g}s.")
+            return False
         self._conn.execute(
             "UPDATE exit_plans SET status='fired', fired_ms=?, fired_reason=?, "
             "updated_ms=? WHERE session_id=? AND symbol=?",
             (now, f"{hit.kind}: {hit.detail}", now, self._sid, plan.symbol))
         self._conn.commit()
-        if fill is None:
-            # The order was rejected, so the position is still open with no plan
-            # watching it. Loud, because it is the one outcome here that leaves
-            # risk unmanaged.
-            self._say("error", f"{plan.symbol} {hit.kind} could not be executed — "
-                               f"position is still open and unprotected")
+        return True
 
     def _fill_armed(self, entry: Armed, price: float, now: int) -> None:
         self._say("order", f"{entry.symbol} triggered at {price:.2f} — "
@@ -402,16 +435,27 @@ class FastLoop:
         makes this close to unreachable -- and carrying it silently if it ever
         happens is worse than an unwanted round trip.
         """
-        plan, error = self.attach(fill.symbol, fill.side, fill.price, levels)
+        pos = self._positions().get(fill.symbol)
+        # The position's blended cost, not this fill. Averaging in moves the risk
+        # reference: a 30bp stop measured from the last clip is priced off a
+        # number that is not what the position cost.
+        entry = pos.avg_price if pos and abs(pos.qty) > 1e-9 else fill.price
+        plan, error = self.attach(fill.symbol, fill.side, entry, levels)
         if plan is not None:
             return plan
         self._say("error", f"{fill.symbol} filled but its exit levels do not resolve "
                            f"({error}). Closing immediately.")
-        self._submit(
+        unwound = self._submit(
             {"symbol": fill.symbol, "side": "sell" if fill.side == "buy" else "buy",
              "qty": fill.qty, "reason": f"unprotected fill: {error}"[:200]},
             can_open=False,
         )
+        if unwound is None:
+            # Do not let "Closing immediately" stand as a claim about something
+            # that did not happen. This is the state _fire also calls out: a
+            # position nothing is watching.
+            self._say("error", f"{fill.symbol} could not be closed either. It is "
+                               f"open with no exit plan — close it by hand.")
         return None
 
     def _resolve_entry(self, entry_id: int, status: str, now: int) -> None:

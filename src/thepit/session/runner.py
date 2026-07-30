@@ -28,10 +28,16 @@ from thepit.session.fastloop import FastLoop
 from thepit.session.prompt import build_plan_prompt
 from thepit.trading import levels as lv
 from thepit.trading.book import (
-    Book, Fill, Limits, check, round_trip_cost_bp, simulate_fill,
+    Book, Fill, Limits, Reject, check, round_trip_cost_bp, simulate_fill,
 )
 
 log = logging.getLogger("thepit.session")
+
+# How long to wait between flatten attempts, and how long to keep trying after a
+# session has already failed. Five seconds matches the quote feed: retrying
+# faster only re-reads the same stale price the risk layer just refused.
+_FLATTEN_RETRY_MS = 5_000
+_FLATTEN_GRACE_MS = 30_000
 
 TICK_SCHEMA = """Return ONLY a JSON object, no prose around it:
 
@@ -105,6 +111,9 @@ class SessionRunner:
         self._halted: str | None = None
         self._book: Book | None = None
         self._fast: FastLoop | None = None
+        # Said once per episode. At a one-second cadence the alternative buries
+        # the activity log in the same line.
+        self._blind_noted = False
         # When true, decisions come from the deterministic rule instead of a
         # model. This is both the fallback when the CLI is unavailable and the
         # control group the LLM has to beat.
@@ -147,6 +156,13 @@ class SessionRunner:
             (self._clock.now_ms(), self.session_id))
         self._conn.commit()
 
+    async def _beat_until_cancelled(self) -> None:
+        """Keep beating through a blocking await. Cancelled by the caller."""
+        while True:
+            with contextlib.suppress(Exception):
+                self.beat()
+            await asyncio.sleep(1.0)
+
     # -- lifecycle -----------------------------------------------------------
 
     def create(self) -> int:
@@ -163,7 +179,7 @@ class SessionRunner:
         self._fast = FastLoop(
             self._conn, self._clock, self.session_id,
             quotes=lambda: self._quotes,
-            positions=lambda: {s: p.qty for s, p in self.book.positions.items()},
+            positions=lambda: self.book.positions,
             submit=lambda proposal, can_open: self._submit(proposal, can_open=can_open),
             say=self.say,
             interval_s=self._cfg.fast_loop_seconds,
@@ -221,17 +237,25 @@ class SessionRunner:
             fast = None
             self._set_status("flattening")
             self.say("phase", "Session clock reached. Closing all positions.")
-            self._flatten()
-            await self._review()
-            self._set_status("done", finished_ms=self._clock.now_ms())
-            eq = self.book.equity(self._quotes)
-            self.say("phase", f"Done. P&L ${eq - self._cfg.capital:+,.2f}")
+            # The flatten window exists so this can retry. A single attempt was
+            # enough to end a session 'done' while still holding: the risk layer
+            # fails closed on a quote older than 120s, the closing order was
+            # rejected, and nothing looked again.
+            stuck = await self._flatten_until_flat(deadline_ms=ends)
+            await self._review(stuck)
+            self._finish(stuck)
         except Exception as exc:  # noqa: BLE001 - a session must not take the engine down
             log.exception("session %s failed", self.session_id)
             self._halted = f"{type(exc).__name__}: {exc}"
             with contextlib.suppress(Exception):
                 self.say("error", f"Session failed: {self._halted}")
-                self._flatten()
+                # Best effort, and bounded: the loop above is gone, so retrying
+                # here is the last chance to end flat.
+                stuck = await self._flatten_until_flat(
+                    deadline_ms=self._clock.now_ms() + _FLATTEN_GRACE_MS)
+                if stuck:
+                    self.say("error", f"STILL HOLDING {', '.join(stuck)} after a "
+                                      f"failed session. Close it by hand.")
             self._set_status("failed", halt_reason=self._halted)
         finally:
             # A failed session must not leave an enforcement task running against
@@ -239,12 +263,70 @@ class SessionRunner:
             if fast is not None:
                 await _stop_task(fast)
 
+    def _finish(self, stuck: list[str]) -> None:
+        """Set the terminal status, and refuse to call a session done if it is not.
+
+        A session that still holds stock is not finished, whatever the clock says.
+        Recording it as 'done' hides an open position behind a status that reads
+        as settled, and the P&L on that row is unrealised whether or not anyone
+        notices.
+
+        The reason a session stopped early is preserved rather than replaced. An
+        earlier version overwrote it with the flatten outcome, so a run that hit
+        its loss limit and then could not close ended up recorded as a flatten
+        problem, with the loss limit -- the thing that actually happened --
+        appearing nowhere in `sessions`, `orders` or `fills`.
+        """
+        eq = self.book.equity(self._quotes)
+        pnl = eq - self._cfg.capital
+        now = self._clock.now_ms()
+        originating = self._halted
+
+        if not stuck:
+            if originating:
+                # It ended flat, but it did not run to the clock. 'done' would
+                # read as an ordinary finish.
+                self._set_status("halted", halt_reason=originating, finished_ms=now)
+                self.say("phase", f"Halted and flat: {originating}. "
+                                  f"P&L ${pnl:+,.2f}")
+            else:
+                self._set_status("done", finished_ms=now)
+                self.say("phase", f"Done. P&L ${pnl:+,.2f}")
+            return
+
+        held = ", ".join(stuck)
+        still_open = f"ended still holding {held}"
+        self._halted = f"{originating}; {still_open}" if originating else still_open
+        self.say("error", f"STILL HOLDING {held} — could not close it before the "
+                          f"session clock ran out. Close it by hand.")
+        self._set_status("halted", halt_reason=self._halted, finished_ms=now)
+        self.say("phase", f"Ended holding {held}. Marked-to-market P&L "
+                          f"${pnl:+,.2f} (not realised — the position is open)")
+
     def _stopped(self) -> bool:
         if self._kill is not None and self._kill.engaged():
             self._halted = "kill switch engaged"
             return True
         if self._halted:
             return True
+
+        # A loss limit is only as good as the mark behind it. With a symbol
+        # missing or its price minutes old, the number is fiction in both
+        # directions: it can invent a breach, and it can hide one. Say so once
+        # and skip the check -- the fast loop has already stopped enforcing
+        # levels on that symbol for the same reason, and the flatten will report
+        # what it could not close.
+        blind = self.book.unpriced(
+            self._quotes, now_ms=self._clock.now_ms(),
+            max_age_s=Limits().max_quote_age_s)
+        if blind:
+            if not self._blind_noted:
+                self._blind_noted = True
+                self.say("error", f"Cannot mark {', '.join(blind)} — the loss limit "
+                                  f"is not being evaluated while the price is stale")
+            return False
+        self._blind_noted = False
+
         # Mark-to-market, including unrealized. Realized-only would let a
         # session avoid the limit indefinitely by refusing to close losers,
         # which is exactly the behaviour the limit exists to stop.
@@ -349,8 +431,8 @@ class SessionRunner:
         for order in parsed.get("orders") or []:
             self._place(order, stop_opening_ms=stop_opening_ms)
 
-    async def _review(self) -> None:
-        summary = self._summary()
+    async def _review(self, stuck: list[str] | None = None) -> None:
+        summary = self._summary(stuck)
         if self.use_stub:
             self._conn.execute(
                 "UPDATE sessions SET review=? WHERE id=?",
@@ -359,9 +441,16 @@ class SessionRunner:
             self._conn.commit()
             return
 
+        # Telling it that it is flat when it is not corrupts the one qualitative
+        # output of the whole harness: the review reasons about a settled P&L that
+        # is actually mark-to-market on an open position.
+        opening = ("The session is over and you are flat.\n\n" if not stuck else
+                   f"The session is over. It could not be closed: you are STILL "
+                   f"HOLDING {', '.join(stuck)}, so the P&L below is marked to "
+                   f"market, not realised.\n\n")
         prompt = (
-            "The session is over and you are flat.\n\n"
-            "## Your plan\n"
+            opening
+            + "## Your plan\n"
             f"{self._plan_text() or '(none recorded)'}\n\n"
             "## What actually happened\n"
             f"{summary}\n\n"
@@ -394,6 +483,16 @@ class SessionRunner:
         side = str(proposal.get("side", "")).lower()
         qty = _qty(proposal)
 
+        if qty <= 0:
+            # Caught here rather than by the risk layer, because an armed entry
+            # never reaches the risk layer: it goes straight into a table whose
+            # CHECK (qty > 0) raises, which took down the whole session from one
+            # malformed field in one order object. Note that any key drift in the
+            # model's JSON ("size", "shares") reads as 0 through _qty, so this is
+            # not only about a literal zero.
+            self._reject(proposal, str(Reject.BAD_QTY))
+            return
+
         levels, error = lv.parse(proposal)
         if error:
             self._reject(proposal, f"unusable levels: {error}")
@@ -416,11 +515,22 @@ class SessionRunner:
             return
 
         if quote is not None:
-            # Validated against the quote first. Discovering that a stop sits on
-            # the wrong side of the entry *after* the fill means unwinding a
-            # position that should never have been opened.
+            # Validated before filling. Discovering that a stop sits on the wrong
+            # side of the entry *after* the fill means unwinding a position that
+            # should never have been opened.
+            #
+            # Against the price this order would actually get, not the quote: the
+            # fill model moves the entry by the assumed slippage, and validating
+            # against the raw last trade let a target land one slippage step
+            # inside the fill -- passing here, then failing after the buy, and
+            # unwinding for a guaranteed loss. For an armed entry the intended
+            # entry is the trigger level itself.
+            entry_estimate = (
+                levels.trigger_price if levels.trigger_price is not None
+                else simulate_fill(side, qty, quote, self._tier).price
+            )
             _, why = lv.resolve(
-                levels, symbol=symbol, side=side, entry_price=quote.last,
+                levels, symbol=symbol, side=side, entry_price=entry_estimate,
                 now_ms=self._clock.now_ms(),
                 round_trip_cost_bp=self._cost_bp() or 3.0,
             )
@@ -535,8 +645,47 @@ class SessionRunner:
                          f"(cost ${fill.cost:.2f})")
         return fill
 
-    def _flatten(self) -> None:
-        """Close everything. can_open=False, so only reducing orders pass."""
+    async def _flatten_until_flat(self, *, deadline_ms: int) -> list[str]:
+        """Keep trying to close everything until flat or out of time.
+
+        Returns the symbols still held, which must be empty for a session to be
+        called done. Retrying matters because the risk layer fails closed on a
+        stale quote -- correctly, trading on a dead feed is worse -- so a single
+        attempt turns a five-minute feed hiccup into a session that reports
+        'done' while still holding stock.
+
+        The kill switch is the exception: it rejects every order by design, so
+        spinning against it would waste the whole window. One attempt, then say
+        so plainly.
+        """
+        killed = bool(self._kill and self._kill.engaged())
+        stuck = self._flatten()
+        if stuck and killed:
+            self.say("error", f"Kill switch is engaged, so {', '.join(stuck)} "
+                              f"cannot be closed by this session.")
+            return stuck
+        if not stuck:
+            return stuck
+
+        act = self.say("wait", f"Could not close {', '.join(stuck)} — retrying "
+                               f"until the price refreshes", pending=True)
+        while stuck and self._clock.now_ms() + _FLATTEN_RETRY_MS < deadline_ms:
+            self.beat()
+            await asyncio.sleep(_FLATTEN_RETRY_MS / 1000)
+            # Only re-submit against a price the risk layer would accept.
+            # Hammering a stale quote every five seconds writes a rejection row
+            # each time, and those rows are supposed to mean "the agent wanted
+            # something it was not allowed to have".
+            stuck = self._flatten(only_tradeable=True)
+        self.done_saying(act, "Closed everything" if not stuck
+                              else f"Gave up trying to close {', '.join(stuck)}")
+        return stuck
+
+    def _flatten(self, *, only_tradeable: bool = False) -> list[str]:
+        """One attempt to close everything. Returns what is still held.
+
+        can_open=False, so only reducing orders pass.
+        """
         # Armed entries first. An entry that triggers into the flatten would open
         # a position seconds before the session is required to be flat.
         if self._fast is not None:
@@ -544,11 +693,26 @@ class SessionRunner:
         for symbol, pos in list(self.book.positions.items()):
             if abs(pos.qty) < 1e-9:
                 continue
+            if only_tradeable and not self._tradeable(symbol):
+                continue
             self._submit(
                 {"symbol": symbol, "side": "sell" if pos.qty > 0 else "buy",
                  "qty": abs(pos.qty), "reason": "session flatten"},
                 can_open=False,
             )
+        return [s for s, p in self.book.positions.items() if abs(p.qty) > 1e-9]
+
+    def _tradeable(self, symbol: str) -> bool:
+        """Would the risk layer accept an order on this symbol's current price?
+
+        The same staleness rule, asked before submitting rather than after being
+        refused.
+        """
+        quote = self._quotes.get(symbol)
+        if quote is None:
+            return False
+        age_s = (self._clock.now_ms() - quote.received_ms) / 1000
+        return age_s <= Limits().max_quote_age_s
 
     # -- helpers -------------------------------------------------------------
 
@@ -636,7 +800,13 @@ class SessionRunner:
         for sym in self._symbols:
             q = self._quotes.get(sym)
             if q:
-                lines.append(f"- {sym}: {q.last:.2f}")
+                age_s = (self._clock.now_ms() - q.received_ms) / 1000
+                # An age, not a bare number. A price printed as current when it
+                # is four minutes old is the model reasoning about a market that
+                # has moved on, and it cannot tell from the number alone.
+                stale = "" if age_s <= Limits().max_quote_age_s else \
+                    f"  [{age_s:.0f}s OLD — orders on this will be rejected]"
+                lines.append(f"- {sym}: {q.last:.2f}{stale}")
         lines.append("")
 
         rejects = self._conn.execute(
@@ -669,6 +839,11 @@ class SessionRunner:
                  "review": "Asking the model to review the session"}[phase]
         act = self.say("model", label + "…", pending=True)
 
+        # A model call blocks this coroutine for up to three minutes, and the
+        # only other heartbeat is between ticks -- so a session doing exactly what
+        # it should looked dead to the reaper, which marked it 'interrupted' and
+        # overwrote its halt reason while the task was still running.
+        beating = asyncio.create_task(self._beat_until_cancelled())
         try:
             res = await claude.ask(
                 prompt, model=self._cfg.model, effort=self._cfg.effort,
@@ -681,6 +856,8 @@ class SessionRunner:
             self._conn.commit()
             self._halted = str(exc)
             return None
+        finally:
+            await _stop_task(beating)
 
         self._claude_session = res.session_id or self._claude_session
         self._conn.execute(
@@ -729,7 +906,7 @@ class SessionRunner:
             "SELECT plan FROM sessions WHERE id=?", (self.session_id,)).fetchone()
         return row["plan"] if row else None
 
-    def _summary(self) -> str:
+    def _summary(self, stuck: list[str] | None = None) -> str:
         eq = self.book.equity(self._quotes)
         pnl = eq - self._cfg.capital
         fills = self._conn.execute(
@@ -742,11 +919,14 @@ class SessionRunner:
             "SELECT COALESCE(SUM(cost),0) FROM fills WHERE session_id=?",
             (self.session_id,)).fetchone()[0]
 
+        label = "Final P&L" if not stuck else "Mark-to-market P&L (NOT realised)"
         lines = [
-            f"Final P&L: ${pnl:+,.2f} ({pnl / self._cfg.capital * 100:+.2f}%)",
+            f"{label}: ${pnl:+,.2f} ({pnl / self._cfg.capital * 100:+.2f}%)",
             f"Modeled trading costs: ${costs:,.2f}",
             f"Fills: {len(fills)} | Rejected orders: {rejects}",
         ]
+        if stuck:
+            lines.append(f"STILL OPEN: {', '.join(stuck)}")
         if self._halted:
             lines.append(f"HALTED: {self._halted}")
         for f in fills:

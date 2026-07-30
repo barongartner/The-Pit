@@ -142,6 +142,11 @@ class SessionConfig:
             )
         if self.flatten_before_end_minutes >= self.duration_minutes:
             errors.append("flatten window is longer than the session")
+        if self.flatten_before_end_minutes < 1:
+            # Zero leaves the closing orders no room at all: the flatten gets one
+            # attempt at the buzzer, and a single stale quote then ends the
+            # session still holding.
+            errors.append("flatten window must be at least 1 minute")
         if not 0 < self.max_position_pct <= 100:
             errors.append("max position must be between 0 and 100 percent")
         if not 0 < self.session_loss_limit_pct <= 100:

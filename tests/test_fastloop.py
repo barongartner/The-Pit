@@ -10,10 +10,13 @@ Time is a `FixedClock`, so a five-minute drift is one line and nothing sleeps.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from thepit.core.clock import FixedClock
 from thepit.core.types import Bar, FeedTier, Quote
+from thepit.engine.killswitch import KillSwitch
 from thepit.session.config import SessionConfig
 from thepit.session.runner import SessionRunner
 from thepit.store import db
@@ -262,6 +265,100 @@ def test_the_flatten_cancels_armed_entries(runner):
     assert runner.fast.armed() == []
 
 
+# -- ending flat, or admitting it did not --------------------------------------
+
+
+@pytest.fixture
+def instant_sleep(runner, monkeypatch):
+    """Make asyncio.sleep advance the FixedClock instead of the wall clock.
+
+    Retries here are five seconds apart by design, so a real sleep would make
+    these tests slower than the behaviour they check.
+    """
+    async def sleep(seconds, *a, **kw):
+        runner._clock.advance(int(seconds * 1000))  # noqa: SLF001
+
+    monkeypatch.setattr("asyncio.sleep", sleep)
+    return runner
+
+
+async def test_a_stale_feed_does_not_end_a_session_that_still_holds(instant_sleep):
+    """The recorded failure: the risk layer fails closed on a quote older than
+    120s, the closing order was rejected, and the session was marked 'done' while
+    still holding stock. It retried nothing and admitted nothing."""
+    runner = instant_sleep
+    buy(runner, stop_bp=30)
+    runner._clock.advance(10 * 60_000)  # noqa: SLF001 - the feed dies
+
+    stuck = await runner._flatten_until_flat(  # noqa: SLF001
+        deadline_ms=runner._clock.now_ms() + 30_000)  # noqa: SLF001
+    assert stuck == ["AAPL"]
+    stale = [r for r in rejections(runner) if "too old" in r]
+    # Exactly one. Retrying into a dead feed must not fill the order table with
+    # rejections that read as "the agent wanted something it could not have".
+    assert len(stale) == 1
+
+    runner._finish(stuck)  # noqa: SLF001
+    row = runner._conn.execute(  # noqa: SLF001
+        "SELECT status, halt_reason FROM sessions WHERE id=?",
+        (runner.session_id,)).fetchone()
+    assert row["status"] == "halted"
+    assert "still holding AAPL" in row["halt_reason"]
+
+
+async def test_the_flatten_retries_until_the_feed_comes_back(runner, monkeypatch):
+    buy(runner, stop_bp=30)
+    runner._clock.advance(10 * 60_000)  # noqa: SLF001 - the feed dies
+
+    retries = 0
+
+    async def sleep(seconds, *a, **kw):
+        nonlocal retries
+        retries += 1
+        runner._clock.advance(int(seconds * 1000))  # noqa: SLF001
+        mark(runner, AAPL=100.0, TSLA=300.0)        # the poller catches up
+
+    monkeypatch.setattr("asyncio.sleep", sleep)
+    stuck = await runner._flatten_until_flat(  # noqa: SLF001
+        deadline_ms=runner._clock.now_ms() + 60_000)  # noqa: SLF001
+
+    assert retries == 1, "one retry was enough once the price refreshed"
+    assert stuck == []
+    assert position(runner) == pytest.approx(0.0)
+
+
+async def test_a_flat_session_is_recorded_as_done(instant_sleep):
+    runner = instant_sleep
+    buy(runner, stop_bp=30)
+    stuck = await runner._flatten_until_flat(  # noqa: SLF001
+        deadline_ms=runner._clock.now_ms() + 30_000)  # noqa: SLF001
+    runner._finish(stuck)  # noqa: SLF001
+    assert stuck == []
+    assert runner._conn.execute(  # noqa: SLF001
+        "SELECT status FROM sessions WHERE id=?",
+        (runner.session_id,)).fetchone()["status"] == "done"
+
+
+async def test_the_kill_switch_is_not_retried_against(instant_sleep, tmp_path):
+    """It rejects every order by design, so spinning would burn the whole window
+    and say nothing useful."""
+    runner = instant_sleep
+    buy(runner, stop_bp=30)
+
+    kill = KillSwitch(tmp_path / "state")
+    kill.engage("test")
+    runner._kill = kill  # noqa: SLF001
+
+    started = runner._clock.now_ms()  # noqa: SLF001
+    stuck = await runner._flatten_until_flat(  # noqa: SLF001
+        deadline_ms=started + 10 * 60_000)
+    assert stuck == ["AAPL"]
+    assert runner._clock.now_ms() == started, "it retried against the kill switch"  # noqa: SLF001
+    messages = [r["message"] for r in runner._conn.execute(  # noqa: SLF001
+        "SELECT message FROM activity WHERE kind='error'")]
+    assert any("Kill switch is engaged" in m for m in messages)
+
+
 # -- revising levels without trading ----------------------------------------
 
 
@@ -300,6 +397,196 @@ def test_cancel_pending_withdraws_an_armed_entry(runner):
     advance(runner, 1, AAPL=100.0, TSLA=296.0)
     assert runner.fast.step() == []
     assert position(runner, "TSLA") == 0.0
+
+
+# -- the audit's findings, pinned ---------------------------------------------
+
+
+def test_a_zero_quantity_order_is_rejected_rather_than_killing_the_session(runner):
+    """It used to reach `pending_entries` directly, whose CHECK (qty > 0) raised
+    out of the tick and failed the whole session. One malformed field in one order
+    object. Any key drift ("size", "shares") reads as 0 through the same path."""
+    for bad in ({"qty": 0}, {"qty": -5}, {}):
+        runner._place({"symbol": "AAPL", "side": "buy", "reason": "t",  # noqa: SLF001
+                       "stop_bp": 30, "trigger": 99.0, **bad},
+                      stop_opening_ms=STOP_OPENING)
+    assert runner.fast.armed() == []
+    assert position(runner) == 0.0
+    assert len([r for r in rejections(runner) if "positive" in r]) == 3
+
+
+def test_a_halted_session_can_still_close_its_position(runner):
+    """The worst one the audit found, and it predates the fast loop: `halted` sat
+    above the de-risking bypass in the risk layer, so the session loss limit
+    locked the losing position open and every closing order for the rest of the
+    window was rejected as 'session halted'."""
+    buy(runner, stop_bp=30)
+    runner._halted = "loss limit hit: down 61.00%"  # noqa: SLF001
+    assert runner._flatten() == []  # noqa: SLF001
+    assert position(runner) == pytest.approx(0.0)
+
+
+def test_a_stop_that_cannot_execute_keeps_its_plan_active(runner, tmp_path):
+    """Marking the plan 'fired' on a rejected order deleted the only thing
+    watching a position that was already through its stop."""
+    buy(runner, stop_bp=30)
+    kill = KillSwitch(tmp_path / "state")
+    kill.engage("test")
+    runner._kill = kill  # noqa: SLF001
+
+    advance(runner, 0.2, AAPL=99.5, TSLA=300.0)
+    assert runner.fast.step() == ["stop-blocked:AAPL"]
+    assert position(runner) == pytest.approx(5.0), "still open, as expected"
+    assert runner.fast.plan("AAPL") is not None, "enforcement was deleted"
+
+    kill.release()
+    assert runner.fast.step() == ["stop:AAPL"]
+    assert position(runner) == pytest.approx(0.0)
+
+
+def test_adding_to_a_position_keeps_the_ratcheted_stop_and_the_blended_entry(runner):
+    """A second fill used to overwrite the plan wholesale: the trailing stop
+    retreated to wherever the new levels put it and risk was re-measured from the
+    latest clip instead of the position's cost."""
+    buy(runner, qty=2.0, stop_bp=50, trail_bp=40)
+    advance(runner, 0.2, AAPL=102.0, TSLA=300.0)
+    runner.fast.step()
+    ratcheted = runner.fast.plan("AAPL").stop_price
+    assert ratcheted == pytest.approx(102.0 * (1 - 0.0040))
+
+    advance(runner, 0.2, AAPL=101.60, TSLA=300.0)
+    buy(runner, qty=2.0, stop_bp=50)          # adds, with a looser stated stop
+    plan = runner.fast.plan("AAPL")
+    assert plan.stop_price == pytest.approx(ratcheted), "the trailed stop retreated"
+    assert plan.high_water == pytest.approx(102.0), "the high-water mark reset"
+    assert plan.entry_price == pytest.approx(
+        runner.book.positions["AAPL"].avg_price), "risk measured off one clip"
+
+
+def test_an_amendment_cannot_silently_untrail_a_ratcheted_stop(runner):
+    buy(runner, stop_bp=50, trail_bp=40)
+    advance(runner, 0.2, AAPL=102.0, TSLA=300.0)
+    runner.fast.step()
+    ratcheted = runner.fast.plan("AAPL").stop_price
+
+    runner._apply_decision(  # noqa: SLF001
+        {"exits": [{"symbol": "AAPL", "stop_bp": 60}]}, STOP_OPENING)
+    assert runner.fast.plan("AAPL").stop_price == pytest.approx(ratcheted)
+
+
+def test_a_target_inside_the_fill_slippage_is_rejected_before_the_buy(runner):
+    """It passed validation against the last trade, failed against the fill, and
+    the position was bought and unwound for a guaranteed loss. The quote is
+    100.00 and a buy fills at 100.015, so both of these are unreachable targets
+    dressed as reachable ones."""
+    buy(runner, stop_bp=30, target=100.01)      # behind the fill entirely
+    buy(runner, stop_bp=30, target=100.03)      # ahead of it, but inside 3bp
+    assert position(runner) == 0.0
+    reasons = " ".join(rejections(runner))
+    assert "not above" in reasons
+    assert "round trip" in reasons
+
+
+def test_an_armed_entry_is_validated_against_its_own_trigger_level(runner):
+    """The intended entry is the level, not today's price: levels that are only
+    sane relative to the trigger must survive being armed."""
+    buy(runner, symbol="TSLA", qty=1.0, trigger=280.0, stop=278.0, target=284.0)
+    armed = runner.fast.armed()
+    assert len(armed) == 1
+    advance(runner, 1, AAPL=100.0, TSLA=279.0)
+    assert runner.fast.step() == ["entry:TSLA"]
+    plan = runner.fast.plan("TSLA")
+    assert plan.stop_price == pytest.approx(278.0)
+
+
+def test_a_fill_is_written_inside_a_real_transaction(runner, monkeypatch):
+    """`with conn:` is a no-op on these connections (isolation_level=None), so
+    the fill, the position and the cash each committed separately and a crash
+    between them left them describing different books."""
+    import contextlib as ctx
+
+    from thepit.trading import book as book_mod
+
+    open_transactions = []
+    real = book_mod.db.immediate
+
+    @ctx.contextmanager
+    def spy(conn):
+        with real(conn) as c:
+            open_transactions.append(c.in_transaction)
+            yield c
+
+    monkeypatch.setattr(book_mod.db, "immediate", spy)
+    buy(runner, stop_bp=30)
+    assert open_transactions == [True], "the fill was not written atomically"
+
+
+def test_the_loss_limit_is_not_evaluated_on_a_price_nobody_can_stand_behind(runner):
+    """It used to read equity off an arbitrarily old quote, and `equity()` valued
+    an unpriced position at zero — which invents a near-total loss and trips the
+    limit off a missing tick."""
+    buy(runner, qty=9.0, stop_bp=300)
+    runner._cfg = replace(runner._cfg, session_loss_limit_pct=5.0)  # noqa: SLF001
+
+    # A symbol vanishing from the dict is ordinary: the API replaces the whole
+    # thing every five seconds from whatever ticks it finds.
+    runner.update_quotes({"TSLA": quote("TSLA", 300.0, runner._clock.now_ms())})  # noqa: SLF001
+    assert runner._stopped() is False, "halted on a phantom loss"  # noqa: SLF001
+    assert runner.book.equity(runner._quotes) == pytest.approx(  # noqa: SLF001
+        runner.book.cash + 9.0 * runner.book.positions["AAPL"].avg_price)
+
+    # And a stale price is refused the same way.
+    mark(runner, AAPL=100.0, TSLA=300.0)
+    runner._clock.advance(10 * 60_000)  # noqa: SLF001
+    assert runner._stopped() is False  # noqa: SLF001
+    messages = [r["message"] for r in runner._conn.execute(  # noqa: SLF001
+        "SELECT message FROM activity WHERE kind='error'")]
+    assert any("Cannot mark AAPL" in m for m in messages)
+
+
+def test_a_real_loss_still_halts_the_session(runner):
+    """The guard above must not become a way to never halt."""
+    buy(runner, qty=9.0, stop_bp=300)
+    runner._cfg = replace(runner._cfg, session_loss_limit_pct=5.0)  # noqa: SLF001
+    advance(runner, 0.5, AAPL=93.0, TSLA=300.0)
+    assert runner._stopped() is True  # noqa: SLF001
+    assert "loss limit" in runner._halted  # noqa: SLF001
+
+
+def test_the_originating_halt_reason_survives_into_the_sessions_row(runner):
+    """A run that hit its loss limit and then could not close was recorded as a
+    flatten problem, with the loss limit appearing nowhere in the database."""
+    buy(runner, stop_bp=30)
+    runner._halted = "loss limit hit: down 6.31%"  # noqa: SLF001
+    runner._finish(["AAPL"])  # noqa: SLF001
+    reason = runner._conn.execute(  # noqa: SLF001
+        "SELECT halt_reason FROM sessions WHERE id=?",
+        (runner.session_id,)).fetchone()["halt_reason"]
+    assert "loss limit hit" in reason
+    assert "still holding AAPL" in reason
+
+
+def test_a_session_that_halted_early_is_not_recorded_as_done(runner):
+    """It ended flat, but it did not run to the clock, and 'done' reads as an
+    ordinary finish."""
+    runner._halted = "kill switch engaged"  # noqa: SLF001
+    runner._finish([])  # noqa: SLF001
+    row = runner._conn.execute(  # noqa: SLF001
+        "SELECT status, halt_reason FROM sessions WHERE id=?",
+        (runner.session_id,)).fetchone()
+    assert row["status"] == "halted"
+    assert row["halt_reason"] == "kill switch engaged"
+
+
+async def test_the_review_is_not_told_it_is_flat_while_holding(runner):
+    buy(runner, stop_bp=30)
+    runner.use_stub = True
+    await runner._review(["AAPL"])  # noqa: SLF001
+    review = runner._conn.execute(  # noqa: SLF001
+        "SELECT review FROM sessions WHERE id=?",
+        (runner.session_id,)).fetchone()["review"]
+    assert "NOT realised" in review
+    assert "STILL OPEN: AAPL" in review
 
 
 # -- what the model is told --------------------------------------------------

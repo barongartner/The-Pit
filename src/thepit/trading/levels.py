@@ -83,16 +83,23 @@ class ExitPlan:
 
         The stop only ever moves in the direction that reduces risk. A trailing
         stop that can retreat is not a stop, it is a hope with a number attached.
+
+        The trail is applied as an *invariant on the stored plan*, not as an event
+        that fires when a new high prints. It used to return early when the high
+        water had not moved, which meant anything that rewrote the stop -- an
+        amendment, an add to the position -- silently un-trailed it until the
+        price made a fresh high, and the plan then enforced a level far below the
+        one it had already ratcheted to.
         """
         if self.trail_bp is None:
             return self
         high = max(self.high_water, price) if self.long else min(self.high_water, price)
-        if high == self.high_water:
-            return self
         offset = high * self.trail_bp / 10_000
         candidate = high - offset if self.long else high + offset
         stop = max(self.stop_price, candidate) if self.long \
             else min(self.stop_price, candidate)
+        if high == self.high_water and stop == self.stop_price:
+            return self
         return replace(self, high_water=high, stop_price=stop)
 
 
@@ -203,6 +210,15 @@ def resolve(
             return None, f"target {target:.2f} is not above the {entry_price:.2f} entry"
         if not long and target >= entry_price:
             return None, f"target {target:.2f} is not below the {entry_price:.2f} entry"
+        target_bp = abs(target - entry_price) / entry_price * 10_000
+        if target_bp < round_trip_cost_bp:
+            # Arithmetic, not preference: a target closer than the round trip
+            # cannot be profitable even when it is hit exactly. One such order
+            # bought and unwound a position for a guaranteed loss.
+            return None, (
+                f"target is {target_bp:.1f}bp away, inside the "
+                f"{round_trip_cost_bp:.1f}bp round trip -- hitting it still loses"
+            )
 
     time_stop_ms = (
         now_ms + int(levels.time_stop_minutes * 60_000)

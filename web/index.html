@@ -260,7 +260,7 @@
   </div>
 </dialog>
 
-<footer id="foot">stage 1: data layer + recorder</footer>
+<footer id="foot">paper trading &middot; levels enforced in Python between model ticks</footer>
 
 <script src="/vendor/uPlot.iife.min.js"></script>
 <script>
@@ -586,7 +586,8 @@
     let html = `<div class="kv">
       <span>#${s.id} <b>${s.status}</b>${d.alive === false && live ? " (no heartbeat)" : ""}</span>
       <span>equity <b>$${d.equity.toFixed(2)}</b></span>
-      <span class="${pnlCls}">P&L <b>${d.pnl >= 0 ? "+" : ""}$${d.pnl.toFixed(2)}</b></span>
+      <span class="${pnlCls}">P&L <b>${d.pnl >= 0 ? "+" : ""}$${d.pnl.toFixed(2)}</b>${
+        d.pnl_realised === false ? ' <span class="stat">unrealised</span>' : ""}</span>
       <span>cash <b>$${s.cash.toFixed(2)}</b></span>
       <span>tokens <b>$${spend.toFixed(3)}</b></span>
     </div>`;

@@ -31,7 +31,7 @@ from thepit.core import calendar
 from thepit.core.clock import now_ms
 from thepit.engine.killswitch import KillSwitch
 from thepit.store import db
-from thepit.store.repos import FetchLogRepo
+from thepit.store.repos import FetchLogRepo, SessionsRepo
 
 def _supports_colour() -> bool:
     """ANSI escapes only when they will actually render.
@@ -150,12 +150,8 @@ def cmd_sessions(config: cfg.Config, args) -> int:
 
     conn = db.connect(config.db_path, readonly=True)
     try:
-        marks = {
-            r["symbol"]: r["last"] for r in conn.execute(
-                "SELECT t.symbol, t.last FROM ticks t JOIN "
-                "(SELECT symbol s, MAX(ts_ms) m FROM ticks GROUP BY symbol) x "
-                "ON x.s = t.symbol AND x.m = t.ts_ms")
-        }
+        repo = SessionsRepo(conn)
+        marks = repo.marks()
         rows = conn.execute(
             "SELECT * FROM sessions ORDER BY id DESC LIMIT ?", (args.limit,)
         ).fetchall()
@@ -166,18 +162,21 @@ def cmd_sessions(config: cfg.Config, args) -> int:
         print(f"{'id':>3}  {'status':10s} {'capital':>10s} {'equity':>10s} "
               f"{'P&L':>9s}  {'':2s} positions")
         for r in rows:
-            positions = conn.execute(
-                "SELECT symbol, qty, avg_price FROM positions "
-                "WHERE session_id=? AND ABS(qty) > 1e-9", (r["id"],)).fetchall()
-            held = sum(p["qty"] * marks.get(p["symbol"], p["avg_price"])
-                       for p in positions)
-            equity = r["cash"] + held
-            pnl = equity - r["capital"]
-            colour = GREEN if pnl > 0 else RED if pnl < 0 else ""
+            # One calculation, in one place. See SessionsRepo: `cash - capital`
+            # is not P&L, and reading it as P&L has already produced a "-$3,060"
+            # on a session that was down $1.97.
+            money = repo.pnl(r["id"], marks)
+            positions = repo.positions(r["id"])
+            colour = GREEN if money.pnl > 0 else RED if money.pnl < 0 else ""
             flag = "!" if r["status"] in ("halted", "failed") else " "
             desc = ", ".join(f"{p['symbol']} {p['qty']:g}" for p in positions) or "flat"
+            # An open position means the number is not settled. Printing it
+            # alongside a closed session's realised figure without saying so is
+            # how a paper result flatters itself.
+            mark = "" if money.realised else f" {DIM}(unrealised){RESET}"
             print(f"{r['id']:>3}  {r['status']:10s} {r['capital']:>10,.2f} "
-                  f"{equity:>10,.2f} {colour}{pnl:>+9,.2f}{RESET}  {flag}  {desc}")
+                  f"{money.equity:>10,.2f} {colour}{money.pnl:>+9,.2f}{RESET}  "
+                  f"{flag}  {desc}{mark}")
             if r["halt_reason"]:
                 print(f"     {DIM}{r['halt_reason']}{RESET}")
             # An open position with no active plan is the state the fast loop

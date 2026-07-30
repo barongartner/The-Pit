@@ -13,8 +13,9 @@ is designed to reach is not "look at the P&L" — see [Honest scope](#honest-sco
 
 ## Status
 
-**Stage 1 of 10: data layer + recorder.** Nothing trades yet. The current milestone is a
-price and news feed that stays up for 24 continuous hours and records everything it sees.
+**Paper trading runs end to end.** A session plans, trades, enforces its own stops between
+model ticks, flattens on the clock, and reviews itself. The feed records prices and SEC
+filings continuously. Ten sessions logged so far, which is a sample and not a result.
 
 Progress lives in [Issues](https://github.com/barongartner/The-Pit/issues), organized by
 milestone.
@@ -23,15 +24,18 @@ milestone.
 
 ## Architecture in one screen
 
-Two processes plus emergency scripts.
+Two processes.
 
 ```
-engine      the only DB writer. Poller, fast loop, policy loop, risk, broker adapter.
+engine      the only DB writer. Poller, kill switch + watchdog, raw recorder.
 api         FastAPI. Reads the DB read-only, serves the dashboard, fans out WebSocket.
-            Every mutation goes through a `commands` table that the engine drains.
-flatten.py  standalone liquidation. Zero imports from the app package, on purpose.
-tradectl    CLI: halt, resume, deposit, spawn, status. Works with the API dead.
+            Sessions currently run as asyncio tasks inside this process.
+tradectl    CLI: status, kill, release, sessions, uptime. Works with the API dead.
 ```
+
+Designed and not built yet: the `commands` table the engine would drain (mutations go
+straight through the loopback control router today), a standalone `flatten.py`, and the
+live-money arming ceremony. Anything below marked *not built* is in the same state.
 
 Claude sets **policy** on a slow loop (strategy, params, risk posture, watchlist,
 conviction). Deterministic Python **executes** on the fast loop. Claude is never in a
@@ -74,35 +78,47 @@ Two design consequences worth knowing up front:
 Nothing external limits paper trading. The caps below are ours, and exist to stop a runaway
 agent rather than to satisfy a regulator. All config-editable.
 
+Enforced today, in `trading/book.py`, against the database rather than in a prompt:
+
 | Limit | Default | On breach |
 |---|---|---|
-| Max position size | 20% of that agent's capital | Order rejected |
-| Max daily loss | 3% | Agent halts for the session |
-| Max drawdown | 15% | Agent halts permanently, manual resume only |
-| Order rate | 10/min per agent | Order rejected |
-| Gross exposure | 100% of agent equity | No leverage by default |
-| Short size | 10% | Tighter than long: short losses are unbounded |
+| Max position size | 20% of session capital | Order rejected |
+| Max concurrent positions | 3 | Order rejected |
+| Session loss limit | 2%, marked to market | Session halts immediately |
+| Quote staleness | 120s | Order rejected — trading on a dead feed is worse than not trading |
+| Shorting | off | Order rejected |
+| Stop on every opening order | required | Order rejected before it can fill |
 
-Drawdown is computed from a flow-adjusted NAV index, so **a deposit does not reset the
-high-water mark** and a withdrawal does not fabricate a drawdown.
+The risk profile presets move the first three together: `preserve` (20% / 3 / −2%),
+`balanced` (50% / 2 / −15%), `risk_it` (100% / 1 / −60%). The last is the default, because
+the account it was built for is $20 that can be lost entirely.
+
+Not built: an order rate limit, a gross exposure cap, a flow-adjusted drawdown index across
+sessions, and a permanent halt that survives a restart. A session is the only unit with a
+loss limit today.
 
 There is no day-trade count limit. The FINRA pattern-day-trader rule and its $25,000 minimum
 were repealed effective 2026-06-04.
 
 ## Safety
 
-- **Kill switch:** `touch ~/.thepit/KILL`. Checked before every order, and by a watchdog
-  running in its own OS thread so it still fires when the asyncio loop is wedged. Presence
-  is the signal; the file is never parsed, because a kill switch that fails to parse is a
-  kill switch that fails open. If the state directory is unreadable, that counts as killed.
-- **`flatten.py`** cancels all orders, then liquidates, then halts every agent. It imports
-  nothing from this package, so an import error here is not an import error in the brake. It
-  is a convergent idempotent loop: re-running it is always safe and always correct.
+- **Kill switch:** `touch ~/.thepit/state/KILL`. Checked before every order, and by a
+  watchdog running in its own OS thread so it still fires when the asyncio loop is wedged.
+  Presence is the signal; the file is never parsed, because a kill switch that fails to parse
+  is a kill switch that fails open. If the state directory is unreadable, that counts as
+  killed. The state directory is shared across modes on purpose — the brake stops everything,
+  not whichever mode happens to be running.
+- **A session refuses to call itself done while it still holds stock.** The flatten retries
+  through its window and, if the feed is dead and the risk layer keeps refusing, the session
+  is recorded as `halted` with the open symbol named. A terminal status that reads as settled
+  while a position is open is worse than an ugly one.
 - **Paper and live are different types, not a boolean.** Separate databases, separate
-  directories, separate credential variable names. There is no `if live:` branch anywhere in
-  the codebase and CI fails the build if one appears.
-- Live mode requires a typed confirmation containing the date and the account's actual
-  equity, and the arming expires at session close. Restarting re-runs the ceremony.
+  directories, separate credential variable names. Mode is a constructor argument read from
+  argv, never from the config file and never mutable at runtime.
+- *Not built:* a standalone `flatten.py` brake that imports nothing from this package, CI
+  that fails the build on an `if live:` branch, and the live arming ceremony (typed
+  confirmation with the date and the account's real equity, expiring at session close).
+  **Live trading has never been run and the arming path does not exist.**
 
 ## Setup
 
@@ -112,7 +128,8 @@ uv run pytest
 ```
 
 Requires nothing preinstalled but `uv`. Python 3.12 is managed by uv; your system Python is
-untouched.
+untouched. On Windows `uv sync` also pulls `tzdata` by platform marker: the market calendar is
+`America/New_York`, Windows ships no tz database, and without it nothing imports at all.
 
 Set a contact address before running. SEC EDGAR requires one in the User-Agent and returns a
 bare 403 without it:

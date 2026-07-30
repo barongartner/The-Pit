@@ -210,6 +210,22 @@ def test_immediate_commits_on_success(conn):
     assert conn.execute("SELECT COUNT(*) FROM bars").fetchone()[0] == 1
 
 
+def test_the_connection_context_manager_is_not_a_transaction(conn):
+    """`with conn:` looks like one and is not, because these connections set
+    isolation_level=None. Code that wrote a multi-row change under it committed
+    each statement separately and rolled nothing back on failure -- which is what
+    `Book.apply` was doing to fills, positions and cash.
+
+    Pinned as a test because the trap is invisible at the call site.
+    """
+    with pytest.raises(ValueError):
+        with conn:
+            _bar(conn)
+            raise ValueError("boom")
+    assert conn.execute("SELECT COUNT(*) FROM bars").fetchone()[0] == 1, (
+        "`with conn:` rolled back — if this ever passes, the pragma changed")
+
+
 def test_concurrent_writers_serialise_rather_than_corrupt(tmp_path):
     """Two writers contending for the lock: the second must WAIT for the first
     and then succeed, not fail.
