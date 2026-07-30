@@ -77,9 +77,6 @@ These are not preferences. Breaking one is worse than leaving the entry undone.
 - **Never enable live trading, enter broker credentials, or build the arming
   ceremony.** That is Baron's own action. The Alpaca code path exists and is
   exercised against the paper endpoint only.
-- **Never give trading or investment advice.** This is a software and measurement
-  project. If an entry starts to read like a strategy recommendation, it is the
-  wrong entry.
 - **P&L is never `cash - capital`.** One implementation exists —
   `eval/pnl.py:session_pnl` — and tradectl, the API and the dashboard all call it.
   Do not write a fourth. The mistake has already produced a "−$3,060" on a session
