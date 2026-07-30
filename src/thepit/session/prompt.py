@@ -218,6 +218,20 @@ def build_plan_prompt(
         "over the limit wastes a tick.")
     add("")
 
+    add("## Your levels are enforced, not remembered")
+    add(f"- Between the ticks above, Python checks your levels against the tape "
+        f"every {config.fast_loop_seconds} seconds and acts without asking you. "
+        f"Stops, targets, time stops and trailing stops all fire on their own.")
+    add("- **Every order that opens a position must carry a stop, or it is "
+        "rejected.** Give it as a price or as a distance in basis points.")
+    add("- You can also arm an entry at a level instead of buying at market. It "
+        "fills only if that price prints, which is the difference between taking "
+        "your plan's entry and chasing it after it has gone.")
+    add("- So write levels you mean. They are not commentary: the number you "
+        "state is the number that executes, seconds after it prints, whether or "
+        "not you would have changed your mind by then.")
+    add("")
+
     add("## Market state")
     add(f"- Session: {session}"
         + (f", {mins_to_close} minutes to the close" if mins_to_close else ""))
@@ -274,8 +288,10 @@ def build_plan_prompt(
     add("")
     add("regime: <one line, cite specific numbers above>")
     add("watchlist: <symbols you will actually trade, one clause each on why>")
-    add("entry: <the specific condition or level that triggers a buy, per symbol>")
-    add("exit: <stop and target, in bp or price, per symbol>")
+    add("entry: <the specific price level that triggers a buy, per symbol>")
+    add("exit: <stop and target, in bp or price, per symbol. These get enforced "
+        "literally, so state numbers you are willing to have executed>")
+    add("timestop: <how long you give a position to work before it is flattened>")
     add("size: <shares or dollars, and why that size given the volatility shown>")
     add("standdown: <the narrow circumstances in which you trade nothing. Be "
         "strict: a rule wide enough to catch an ordinary session guarantees zero>")

@@ -109,7 +109,10 @@ class RawRecorder:
             # valid gzip stream, so the file stays readable with plain zcat.
             with gzip.open(path, "at", encoding="utf-8", compresslevel=6) as fh:
                 fh.write(line + "\n")
-            return str(rel)
+            # POSIX separators, not the platform's. This string goes into
+            # `fetch_log.raw_path`, and a database written on Windows should not
+            # record paths that only resolve on Windows.
+            return rel.as_posix()
         except Exception:  # pragma: no cover - defensive, see docstring
             return None
 

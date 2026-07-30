@@ -180,6 +180,22 @@ def cmd_sessions(config: cfg.Config, args) -> int:
                   f"{equity:>10,.2f} {colour}{pnl:>+9,.2f}{RESET}  {flag}  {desc}")
             if r["halt_reason"]:
                 print(f"     {DIM}{r['halt_reason']}{RESET}")
+            # An open position with no active plan is the state the fast loop
+            # exists to prevent, so it is shown rather than left to be inferred.
+            for p in positions:
+                plan = conn.execute(
+                    "SELECT stop_price, target_price, trail_bp FROM exit_plans "
+                    "WHERE session_id=? AND symbol=? AND status='active'",
+                    (r["id"], p["symbol"])).fetchone()
+                if plan is None:
+                    print(f"     {RED}{p['symbol']}: no exit plan{RESET}")
+                    continue
+                bits = [f"stop {plan['stop_price']:.2f}"]
+                if plan["target_price"]:
+                    bits.append(f"target {plan['target_price']:.2f}")
+                if plan["trail_bp"]:
+                    bits.append(f"trailing {plan['trail_bp']:.0f}bp")
+                print(f"     {DIM}{p['symbol']}: {', '.join(bits)}{RESET}")
     finally:
         conn.close()
     return 0

@@ -37,6 +37,11 @@ Claude sets **policy** on a slow loop (strategy, params, risk posture, watchlist
 conviction). Deterministic Python **executes** on the fast loop. Claude is never in a
 sub-minute decision path, which is what makes a 1-5 second inference latency irrelevant.
 
+Concretely: the model returns entry, stop, target, time-stop and trailing levels as
+fields. Python checks them against the tape every five seconds and acts on its own --
+including while the next model call is in flight. An order that opens a position without
+a stop is rejected.
+
 Agents propose. The risk layer disposes. It rejects with a reason and never silently
 resizes an order.
 

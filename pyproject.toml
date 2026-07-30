@@ -16,6 +16,10 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
     "httpx>=0.28",
+    # Windows ships no tz database, so zoneinfo("America/New_York") raises at
+    # import and every module that touches the calendar fails. Not optional on
+    # this platform: the market clock is not something to guess at.
+    "tzdata>=2025.2; sys_platform == 'win32'",
 ]
 
 [project.scripts]

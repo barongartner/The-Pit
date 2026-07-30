@@ -37,8 +37,8 @@ def plan(symbols: list[str]) -> str:
     return (
         "Deterministic baseline (no model).\n\n"
         f"Rule: each tick, rank {', '.join(symbols)} by their last 5 minutes of "
-        f"return. If the leader has moved more than {MIN_MOVE_BP:.0f}bp, buy it. "
-        f"Exit at {TARGET_BP:.0f}bp profit or {STOP_BP:.0f}bp loss. "
+        f"return. If the leader has moved more than {MIN_MOVE_BP:.0f}bp, buy it "
+        f"with a {STOP_BP:.0f}bp stop and a {TARGET_BP:.0f}bp target attached. "
         "One position at a time. Flat at the end.\n\n"
         "This is a floor, not a strategy. Its purpose is to be beaten."
     )
@@ -51,29 +51,17 @@ def decide(
     positions: dict[str, float],
     budget: float = 1500.0,
 ) -> str:
-    """Return the same JSON shape an LLM tick returns."""
+    """Return the same JSON shape an LLM tick returns.
+
+    Exits are stated as levels rather than executed here. The fast loop enforces
+    them every few seconds, which is both better than this rule checking them
+    once a tick and necessary for the comparison to mean anything: the control
+    group has to run through the identical execution path, not a slower one.
+    """
     orders: list[dict] = []
 
-    # Exits first: never leave a stop unchecked because an entry looked good.
-    for symbol, qty in positions.items():
-        if abs(qty) < 1e-9:
-            continue
-        quote = quotes.get(symbol)
-        if quote is None:
-            continue
-        entry = _entry_price(conn, symbol)
-        if entry is None:
-            continue
-        move_bp = (quote.last - entry) / entry * 10_000
-        if move_bp >= TARGET_BP or move_bp <= -STOP_BP:
-            orders.append({
-                "symbol": symbol, "side": "sell" if qty > 0 else "buy",
-                "qty": abs(qty), "conviction": 5,
-                "reason": f"{'target' if move_bp > 0 else 'stop'} at {move_bp:+.0f}bp",
-            })
-
     holding = any(abs(q) > 1e-9 for q in positions.values())
-    if not holding and not orders:
+    if not holding:
         ranked = sorted(
             ((s, _return_bp(conn, s, 5)) for s in symbols),
             key=lambda x: x[1] or -1e9, reverse=True,
@@ -91,6 +79,7 @@ def decide(
                 orders.append({
                     "symbol": symbol, "side": "buy", "qty": qty, "conviction": 4,
                     "reason": f"strongest 5m move, {move:+.0f}bp",
+                    "stop_bp": STOP_BP, "target_bp": TARGET_BP,
                 })
 
     return json.dumps({
@@ -105,12 +94,3 @@ def _return_bp(conn: sqlite3.Connection, symbol: str, minutes: int) -> float | N
         return None
     first, last = bars[0].c, bars[-1].c
     return (last - first) / first * 10_000 if first else None
-
-
-def _entry_price(conn: sqlite3.Connection, symbol: str) -> float | None:
-    row = conn.execute(
-        "SELECT avg_price FROM positions WHERE symbol=? AND ABS(qty) > 1e-9 "
-        "ORDER BY session_id DESC LIMIT 1",
-        (symbol,),
-    ).fetchone()
-    return row["avg_price"] if row else None

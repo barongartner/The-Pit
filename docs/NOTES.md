@@ -40,6 +40,24 @@ simulator, never better. Bar-based fills validate *logic*, not *edge*.
 Every fill records its `sim_tier` so a bar-derived and a quote-derived run can
 never be averaged into one number.
 
+## An enforced stop is still late
+
+The fast loop (`session/fastloop.py`) checks levels every 5 seconds against
+last-trade snapshots from a feed that itself updates about every 5 seconds. So a
+stop here fires **late by up to one interval plus feed latency**, on a price that
+already printed. It cannot see the path between two snapshots, and it has no
+bid/ask to cross.
+
+That is a large improvement on the previous behaviour -- a level was checked only
+when the model was next asked, up to a full policy tick late -- and it is not the
+same thing as a resting stop order at a venue. Measured slippage past a level
+belongs in the eval module once it exists; do not report enforced stops as if
+they filled at the level.
+
+Two conservative choices inside it, both to keep the paper result from
+flattering: a breach is checked before a trailing stop is raised, and a stop and
+a target reachable in the same interval resolve as the stop.
+
 ## Backtests are contaminated
 
 The model knows what happened before its training cutoff. No amount of care

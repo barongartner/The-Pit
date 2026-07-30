@@ -300,6 +300,15 @@ def create_app(config: cfg.Config, *, allow_control: bool) -> FastAPI:
                 "equity": equity,
                 "pnl": equity - s_row["capital"],
                 "positions": positions,
+                # What Python is enforcing right now, and what it is waiting on.
+                # Both are the answer to "why did that close by itself", which is
+                # otherwise only inferable from the activity log.
+                "exit_plans": [dict(r) for r in c.execute(
+                    "SELECT * FROM exit_plans WHERE session_id=? "
+                    "ORDER BY status='active' DESC, symbol", (sid,))],
+                "pending_entries": [dict(r) for r in c.execute(
+                    "SELECT * FROM pending_entries WHERE session_id=? "
+                    "ORDER BY status='waiting' DESC, id DESC LIMIT 25", (sid,))],
                 # Rejected orders are included deliberately: "what did it want
                 # to do that it could not" is the more interesting question.
                 "orders": [dict(r) for r in c.execute(
@@ -351,6 +360,7 @@ def create_app(config: cfg.Config, *, allow_control: bool) -> FastAPI:
                     "capital": cfg_obj.capital,
                     "symbols": symbols,
                     "policy_ticks": cfg_obj.tick_count,
+                    "fast_loop_seconds": cfg_obj.fast_loop_seconds,
                     "model_calls": cfg_obj.model_calls,
                     "latency_s": cfg_obj.estimated_latency_s,
                     "trading_minutes": cfg_obj.trading_minutes,
@@ -465,6 +475,7 @@ def _parse_session(
             capital=float(payload.get("capital", 10_000)),
             symbols=tuple(payload.get("symbols") or ()),
             policy_tick_minutes=int(payload.get("policy_tick_minutes", 5)),
+            fast_loop_seconds=int(payload.get("fast_loop_seconds", 5)),
             max_position_pct=float(payload.get("max_position_pct", 20)),
             max_concurrent_positions=int(payload.get("max_concurrent_positions", 3)),
             session_loss_limit_pct=float(payload.get("session_loss_limit_pct", 2)),

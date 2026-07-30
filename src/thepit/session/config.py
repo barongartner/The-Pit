@@ -78,6 +78,15 @@ class SessionConfig:
     # model is never in a sub-minute execution path.
     policy_tick_minutes: int = 5
 
+    # How often the fast loop enforces the levels the model committed to. No
+    # model call, so seconds are achievable here in a way they are not above.
+    #
+    # 5 seconds matches the feed: Yahoo updates roughly that often and polling
+    # faster would only re-read the same price with more heat. This is the
+    # honest resolution of a stop in this system -- late by up to one interval
+    # plus feed latency, which is not the same thing as a venue stop order.
+    fast_loop_seconds: int = 5
+
     # Risk. These are ceilings the engine enforces, not suggestions in a prompt.
     max_position_pct: float = 20.0
     max_concurrent_positions: int = 3
@@ -114,6 +123,15 @@ class SessionConfig:
             errors.append("capital must be positive")
         if self.policy_tick_minutes < 1:
             errors.append("policy tick must be at least 1 minute")
+        if not 1 <= self.fast_loop_seconds <= 60:
+            errors.append("fast loop interval must be between 1 and 60 seconds")
+        if self.fast_loop_seconds >= self.policy_tick_minutes * 60:
+            # Otherwise there is no enforcement *between* ticks, which is the
+            # entire purpose of the second loop.
+            errors.append(
+                f"fast loop ({self.fast_loop_seconds}s) must be shorter than the "
+                f"policy tick ({self.policy_tick_minutes}m)"
+            )
 
         # A session that re-thinks once has no feedback loop; it is a single
         # decision wearing a session's clothes.

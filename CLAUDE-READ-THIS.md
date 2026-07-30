@@ -26,7 +26,7 @@ if it comes up rather than implying otherwise.
 
 ```bash
 uv sync
-uv run pytest                              # 134 tests
+uv run pytest                              # 184 tests
 export THEPIT_CONTACT_EMAIL=you@example.com   # SEC 403s without it
 
 uv run python -m thepit.engine.main        # records prices + filings
@@ -53,12 +53,20 @@ core/       clock, calendar, value types, feed protocols
 feeds/      yahoo (prices), edgar (filings), shared http, raw recorder
 engine/     poller, kill switch + watchdog, entrypoint
 trading/    book.py — ledger, fill model, risk checks (all three together)
+            levels.py — exit levels: parse, resolve, decide if breached (pure)
 agent/      claude.py (CLI subprocess), stub.py (deterministic baseline)
 session/    config.py, prompt.py, runner.py — plan/tick/flatten/review
+            fastloop.py — enforces those levels every 5s, no model in the path
 api/        FastAPI, endpoints, WebSocket
 web/        single-page dashboard, vendored uPlot
 docs/NOTES.md   methodology and honest limits. Read before eval work.
 ```
+
+Two loops run inside a session. The **slow loop** asks the model every few
+minutes. The **fast loop** enforces the levels that model committed to every five
+seconds, including while a 40-second model call is in flight. Levels live in
+`exit_plans` and `pending_entries`, so what is being enforced is inspectable
+while the session runs rather than buried in a reason field.
 
 `session/prompt.py` is the highest-leverage file in the repo. Everything else
 exists to put accurate numbers into it.
@@ -98,8 +106,14 @@ late entries lost the session."
 
 **A model call takes 9–40 seconds.** Sub-minute policy ticks are not possible;
 the call outlasts the interval. `validate()` rejects configs with fewer than two
-ticks. What is missing is a *fast loop* that enforces stops between slow model
-decisions (issue #18) — that, not tick rate, is the real gap.
+ticks. The answer to a 10-second tick request is the fast loop, not a faster
+model: levels are enforced every 5 seconds by Python and the model is asked every
+few minutes.
+
+**An enforced stop is not a venue stop.** The fast loop fires up to one interval
+plus feed latency late, on a price that already printed, with no bid/ask to
+cross. Say that plainly rather than reporting a level as if it filled at the
+level.
 
 **Migrations only run in the engine.** A new `.sql` file needs an engine restart
 before the API can see the tables.
@@ -135,8 +149,8 @@ before the API can see the tables.
 Paper trading works end to end. Ten sessions logged; four completed, one
 positive. Yahoo prices and SEC filings recording continuously.
 
-Not done: fast loop (#18), Alpaca for a real bid/ask (#11), Claude Design UI
-(#12), live-money arming, eval module.
+Not done: Alpaca for a real bid/ask (#11), Claude Design UI (#12), live-money
+arming, eval module.
 
 **Never enable live trading, enter broker credentials, or run a live session.**
 That is Baron's action alone. The code path exists and is exercised against

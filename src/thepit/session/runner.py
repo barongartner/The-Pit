@@ -4,6 +4,11 @@ The loop is deliberately dull. Claude decides *what* on a slow tick; this module
 decides *when* and enforces *whether*. Every order goes through the risk check
 before it can become a fill, and there is no path around that -- `_submit` is
 the only thing that writes to `orders`.
+
+Two loops run at once. This one asks the model every few minutes. The fast loop
+(`session/fastloop.py`) enforces the levels that model committed to every few
+seconds, including while a 40-second model call is in flight. Before it existed,
+nothing at all happened between policy ticks.
 """
 
 from __future__ import annotations
@@ -19,8 +24,12 @@ from thepit.core.clock import Clock
 from thepit.core.types import FeedTier, Quote
 from thepit.engine.killswitch import KillSwitch
 from thepit.session.config import SessionConfig
+from thepit.session.fastloop import FastLoop
 from thepit.session.prompt import build_plan_prompt
-from thepit.trading.book import Book, Limits, check, round_trip_cost_bp, simulate_fill
+from thepit.trading import levels as lv
+from thepit.trading.book import (
+    Book, Fill, Limits, check, round_trip_cost_bp, simulate_fill,
+)
 
 log = logging.getLogger("thepit.session")
 
@@ -29,11 +38,37 @@ TICK_SCHEMA = """Return ONLY a JSON object, no prose around it:
 {
   "assessment": "<=200 chars on what changed since your plan",
   "orders": [
-    {"symbol":"AAPL","side":"buy","qty":0.0125,"reason":"<=120 chars","conviction":7}
-  ]
+    {"symbol":"AAPL","side":"buy","qty":0.0125,"reason":"<=120 chars","conviction":7,
+     "stop":338.90,"target":341.40,"trigger":339.80,
+     "trail_bp":20,"time_stop_minutes":4,"valid_minutes":10}
+  ],
+  "exits": [
+    {"symbol":"AAPL","stop":339.60,"target":342.00}
+  ],
+  "cancel_pending": ["TSLA"]
 }
 
 "qty" may be fractional -- decimals are expected on a small account.
+
+## Your levels are enforced in Python, every few seconds
+
+Between these ticks a fast loop checks your levels against the tape without
+asking you anything. It closes a position when its stop or target prints, expires
+a time stop, and drags a trailing stop. You do not have to wait for your next
+tick to be stopped out, and you cannot rely on being asked before a level fires.
+
+- **Every order that opens or adds to a position must carry a stop.** No stop,
+  the order is rejected. This is not advice.
+- "stop" and "target" are prices; "stop_bp" and "target_bp" are distances from
+  your fill in basis points. Use one form or the other, not both.
+- "trigger" arms the entry: it fills only when that price prints, at market at
+  that moment. Without it you are buying now, at whatever the tape says. Use a
+  trigger instead of chasing a level that has already gone.
+- "valid_minutes" expires an armed entry that never prints. "time_stop_minutes"
+  flattens a position that has not worked by then.
+- "trail_bp" moves the stop up behind the best price and never back down.
+- "exits" revises the levels on a position you already hold, without trading.
+- "cancel_pending" withdraws armed entries you no longer want.
 
 You are expected to trade when a reasonable opportunity exists. You have a
 short window and finishing flat earns nothing.
@@ -69,6 +104,7 @@ class SessionRunner:
         self._claude_session: str | None = None
         self._halted: str | None = None
         self._book: Book | None = None
+        self._fast: FastLoop | None = None
         # When true, decisions come from the deterministic rule instead of a
         # model. This is both the fallback when the CLI is unavailable and the
         # control group the LLM has to beat.
@@ -124,7 +160,21 @@ class SessionRunner:
         self._conn.commit()
         self.session_id = int(cur.lastrowid)
         self._book = Book(self._conn, self.session_id, self._cfg.capital)
+        self._fast = FastLoop(
+            self._conn, self._clock, self.session_id,
+            quotes=lambda: self._quotes,
+            positions=lambda: {s: p.qty for s, p in self.book.positions.items()},
+            submit=lambda proposal, can_open: self._submit(proposal, can_open=can_open),
+            say=self.say,
+            interval_s=self._cfg.fast_loop_seconds,
+            round_trip_cost_bp=self._cost_bp() or 3.0,
+        )
         return self.session_id
+
+    @property
+    def fast(self) -> FastLoop:
+        assert self._fast is not None, "create() first"
+        return self._fast
 
     def update_quotes(self, quotes: dict[str, Quote]) -> None:
         self._quotes = quotes
@@ -147,9 +197,19 @@ class SessionRunner:
                           f"${self._cfg.capital:,.0f}"
                           + (" (deterministic baseline)" if self.use_stub else
                              f" ({self._cfg.model})"))
+        self.say("phase", f"Levels enforced every {self._cfg.fast_loop_seconds}s "
+                          f"between ticks.")
 
+        fast: asyncio.Task | None = None
         try:
             await self._plan()
+
+            # Started after planning and cancelled before the flatten, so it is
+            # alive for exactly the window in which positions can exist. It runs
+            # concurrently with the model calls below -- that is the point: the
+            # interval where nothing watched the book used to include the whole
+            # 40 seconds the model spent thinking.
+            fast = asyncio.create_task(self.fast.run())
 
             tick_no = 0
             while self._clock.now_ms() < stop_opening and not self._stopped():
@@ -157,6 +217,8 @@ class SessionRunner:
                 await self._tick(stop_opening, tick_no)
                 await self._sleep_until_next_tick(stop_opening)
 
+            await _stop_task(fast)
+            fast = None
             self._set_status("flattening")
             self.say("phase", "Session clock reached. Closing all positions.")
             self._flatten()
@@ -171,6 +233,11 @@ class SessionRunner:
                 self.say("error", f"Session failed: {self._halted}")
                 self._flatten()
             self._set_status("failed", halt_reason=self._halted)
+        finally:
+            # A failed session must not leave an enforcement task running against
+            # a book nothing else is driving.
+            if fast is not None:
+                await _stop_task(fast)
 
     def _stopped(self) -> bool:
         if self._kill is not None and self._kill.engaged():
@@ -237,8 +304,7 @@ class SessionRunner:
                 " VALUES (?,?,'tick','(deterministic baseline)',?,?)",
                 (self.session_id, self._clock.now_ms(), text, text))
             self._conn.commit()
-            for order in (json.loads(text).get("orders") or []):
-                self._submit(order, can_open=True)
+            self._apply_decision(json.loads(text), stop_opening_ms)
             return
 
         res = await self._ask(self._tick_prompt(remaining), phase="tick")
@@ -257,8 +323,31 @@ class SessionRunner:
         )
         self._conn.commit()
 
+        self._apply_decision(parsed, stop_opening_ms)
+
+    def _apply_decision(self, parsed: dict, stop_opening_ms: int) -> None:
+        """Act on one tick response: cancellations, then exits, then orders.
+
+        That order matters. Revising a stop must happen before new exposure is
+        taken, so a tick that both tightens a stop and opens a position cannot
+        leave the old level enforced against the new one for an interval.
+        """
+        cancels = parsed.get("cancel_pending") or []
+        if isinstance(cancels, str):
+            cancels = [cancels]
+        if cancels:
+            self.fast.cancel_pending([str(s).upper() for s in cancels])
+
+        for amendment in parsed.get("exits") or []:
+            symbol = str(amendment.get("symbol", "")).upper()
+            levels, error = lv.parse(amendment)
+            if error is None:
+                _, error = self.fast.amend(symbol, levels)
+            if error:
+                self.say("error", f"Could not revise {symbol} levels: {error}")
+
         for order in parsed.get("orders") or []:
-            self._submit(order, can_open=True)
+            self._place(order, stop_opening_ms=stop_opening_ms)
 
     async def _review(self) -> None:
         summary = self._summary()
@@ -293,20 +382,110 @@ class SessionRunner:
 
     # -- orders --------------------------------------------------------------
 
-    def _submit(self, proposal: dict, *, can_open: bool) -> None:
+    def _place(self, proposal: dict, *, stop_opening_ms: int) -> None:
+        """Route one proposed order: reject it, arm it, or submit it now.
+
+        Everything about levels happens here, before `_submit`, because the two
+        failures being prevented are only preventable up front: a position that
+        exists with no stop, and an entry taken at a price the plan did not
+        choose. Both were paid for -- see the notes in fastloop.py.
+        """
+        symbol = str(proposal.get("symbol", "")).upper()
+        side = str(proposal.get("side", "")).lower()
+        qty = _qty(proposal)
+
+        levels, error = lv.parse(proposal)
+        if error:
+            self._reject(proposal, f"unusable levels: {error}")
+            return
+
+        quote = self._quotes.get(symbol)
+        opening = self._opens_exposure(symbol, side, qty)
+
+        if not opening:
+            if levels.trigger_price is not None:
+                # A conditional exit is what an exit plan is for; honouring a
+                # trigger here would create a second, competing mechanism.
+                self.say("order", f"Ignoring the trigger on a reducing "
+                                  f"{side} {symbol} — use \"exits\" to set levels")
+            self._submit(proposal, can_open=False)
+            return
+
+        if not levels.has_stop:
+            self._reject(proposal, "an opening order must carry a stop")
+            return
+
+        if quote is not None:
+            # Validated against the quote first. Discovering that a stop sits on
+            # the wrong side of the entry *after* the fill means unwinding a
+            # position that should never have been opened.
+            _, why = lv.resolve(
+                levels, symbol=symbol, side=side, entry_price=quote.last,
+                now_ms=self._clock.now_ms(),
+                round_trip_cost_bp=self._cost_bp() or 3.0,
+            )
+            if why:
+                self._reject(proposal, f"unusable levels: {why}")
+                return
+
+            if levels.trigger_price is not None:
+                direction = lv.arm_direction(side, levels.trigger_price, quote.last)
+                if not lv.triggered(direction, levels.trigger_price, quote.last):
+                    self.fast.arm(
+                        symbol, side, qty, levels,
+                        price_now=quote.last, expires_ms=stop_opening_ms,
+                        reason=str(proposal.get("reason", "")),
+                        conviction=_conviction(proposal),
+                    )
+                    return
+
+        fill = self._submit(proposal, can_open=True)
+        if fill is not None:
+            self.fast.protect(fill, levels)
+
+    def _opens_exposure(self, symbol: str, side: str, qty: float) -> bool:
+        """Does this order add risk rather than reduce it?
+
+        The same test the risk layer uses, and it has to be the same: a stop is
+        required for opening exposure and would be nonsense on a closing order.
+        """
+        pos = self.book.positions.get(symbol)
+        current = pos.qty if pos else 0.0
+        projected = current + (qty if side == "buy" else -qty)
+        return abs(projected) >= abs(current)
+
+    def _reject(self, proposal: dict, reason: str) -> None:
+        """Record a proposal that never reached the risk layer.
+
+        Written to `orders` as rejected rather than dropped, for the same reason
+        risk rejections are kept: "what did it want to do that it was not allowed
+        to do" is the more interesting question.
+        """
+        self._conn.execute(
+            "INSERT INTO orders (session_id,ts_ms,symbol,side,qty,status,reason,"
+            "reject_reason,conviction) VALUES (?,?,?,?,?,'rejected',?,?,?)",
+            (self.session_id, self._clock.now_ms(),
+             str(proposal.get("symbol", "")).upper(),
+             "buy" if str(proposal.get("side", "")).lower() != "sell" else "sell",
+             max(_qty(proposal), 0.0001), str(proposal.get("reason", ""))[:200],
+             reason, _conviction(proposal)),
+        )
+        self._conn.commit()
+        self.say("order", f"REJECTED {proposal.get('side')} "
+                          f"{proposal.get('symbol')} — {reason}")
+
+    def _submit(self, proposal: dict, *, can_open: bool) -> Fill | None:
         """The only path from a proposal to a fill. Every order passes the risk
-        check here; there is no other writer of `orders`."""
+        check here; there is no other writer of `orders`.
+
+        Returns the fill so the caller can attach exit levels to the price that
+        was actually paid rather than the quote the decision was made on."""
         now = self._clock.now_ms()
         symbol = str(proposal.get("symbol", "")).upper()
         side = str(proposal.get("side", "")).lower()
-        try:
-            qty = float(proposal.get("qty", 0))
-        except (TypeError, ValueError):
-            qty = 0.0
+        qty = _qty(proposal)
         reason = str(proposal.get("reason", ""))[:200]
-        conviction = proposal.get("conviction")
-        conviction = int(conviction) if isinstance(conviction, (int, float)) and \
-            1 <= conviction <= 10 else None
+        conviction = _conviction(proposal)
 
         cur = self._conn.execute(
             "INSERT INTO orders (session_id,ts_ms,symbol,side,qty,status,reason,"
@@ -341,7 +520,7 @@ class SessionRunner:
             )
             self._conn.commit()
             self.say("order", f"REJECTED {side} {qty:g} {symbol} — {verdict.reason}")
-            return
+            return None
 
         assert quote is not None
         fill = simulate_fill(side, qty, quote, self._tier)
@@ -354,9 +533,14 @@ class SessionRunner:
         self._snapshot_equity(now)
         self.say("fill", f"FILLED {side} {qty:g} {symbol} @ {fill.price:.2f} "
                          f"(cost ${fill.cost:.2f})")
+        return fill
 
     def _flatten(self) -> None:
         """Close everything. can_open=False, so only reducing orders pass."""
+        # Armed entries first. An entry that triggers into the flatten would open
+        # a position seconds before the session is required to be flat.
+        if self._fast is not None:
+            self.fast.cancel_pending()
         for symbol, pos in list(self.book.positions.items()):
             if abs(pos.qty) < 1e-9:
                 continue
@@ -424,9 +608,29 @@ class SessionRunner:
                         f"- {sym}: {pos.qty:+.0f} @ {pos.avg_price:.2f}, "
                         f"now {q.last:.2f}, unrealized ${pos.unrealized(q.last):+,.2f}"
                     )
+                    # The levels currently being enforced on it. Without this the
+                    # model cannot tell a stop it set from one the fast loop has
+                    # already trailed, and would revise against the wrong number.
+                    plan = self.fast.plan(sym)
+                    if plan:
+                        lines.append(f"  levels being enforced: "
+                                     f"{self.fast.describe(plan).split('levels: ', 1)[-1]}")
         else:
             lines.append("You have no open positions.")
         lines.append("")
+
+        armed = self.fast.armed()
+        if armed:
+            lines.append("### Armed entries, waiting on a level")
+            for a in armed:
+                mins = max(0, (a.expires_ms - self._clock.now_ms()) // 60_000)
+                lines.append(
+                    f"- {a.side} {a.qty:g} {a.symbol} when price is "
+                    f"{'at or below' if a.direction == 'at_or_below' else 'at or above'}"
+                    f" {a.trigger_price:.2f} (expires in {mins}m)")
+            lines.append("These fill without asking you. Cancel any you no longer "
+                         "want with \"cancel_pending\".")
+            lines.append("")
 
         lines.append("### Prices now")
         for sym in self._symbols:
@@ -556,10 +760,29 @@ class SessionRunner:
         self._conn.commit()
 
 
+def _qty(proposal: dict) -> float:
+    try:
+        return float(proposal.get("qty", 0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _conviction(proposal: dict) -> int | None:
+    value = proposal.get("conviction")
+    return int(value) if isinstance(value, (int, float)) and 1 <= value <= 10 else None
+
+
+async def _stop_task(task: asyncio.Task) -> None:
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+
 def _config_json(cfg: SessionConfig) -> dict:
     return {
         "duration_minutes": cfg.duration_minutes, "capital": cfg.capital,
         "symbols": list(cfg.symbols), "policy_tick_minutes": cfg.policy_tick_minutes,
+        "fast_loop_seconds": cfg.fast_loop_seconds,
         "max_position_pct": cfg.max_position_pct,
         "max_concurrent_positions": cfg.max_concurrent_positions,
         "session_loss_limit_pct": cfg.session_loss_limit_pct,
