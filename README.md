@@ -30,7 +30,7 @@ Two processes.
 engine      the only DB writer. Poller, kill switch + watchdog, raw recorder.
 api         FastAPI. Reads the DB read-only, serves the dashboard, fans out WebSocket.
             Sessions currently run as asyncio tasks inside this process.
-tradectl    CLI: status, kill, release, sessions, uptime. Works with the API dead.
+tradectl    CLI: status, kill, release, sessions, eval, uptime. Works with the API dead.
 ```
 
 Designed and not built yet: the `commands` table the engine would drain (mutations go
@@ -64,6 +64,11 @@ Things this project can establish, and roughly when:
 That last row is not pessimism, it is arithmetic. A system built to chase it would spend a
 year failing to answer it. This one is built around the four questions above, which are
 tractable and more interesting anyway.
+
+`uv run tradectl eval` is where those questions get answered, and it is deliberately
+grudging about it: exclusions before means, an interval on every rate, no standard
+deviation under five sessions, no correlation under twenty episodes, and the
+sessions-per-arm the observed spread would actually need printed next to the n it has.
 
 Two design consequences worth knowing up front:
 

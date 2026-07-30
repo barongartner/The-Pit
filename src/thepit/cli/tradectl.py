@@ -3,6 +3,8 @@
     uv run tradectl status
     uv run tradectl kill "reason"
     uv run tradectl release
+    uv run tradectl sessions
+    uv run tradectl eval [session_id]
     uv run tradectl uptime --hours 24
 
 **Everything here works with the API process dead**, which is the whole point.
@@ -30,8 +32,11 @@ from thepit import config as cfg
 from thepit.core import calendar
 from thepit.core.clock import now_ms
 from thepit.engine.killswitch import KillSwitch
+from thepit.eval import pnl as eval_pnl
+from thepit.eval import report as eval_report
 from thepit.store import db
 from thepit.store.repos import FetchLogRepo, SessionsRepo
+
 
 def _supports_colour() -> bool:
     """ANSI escapes only when they will actually render.
@@ -140,7 +145,7 @@ def cmd_sessions(config: cfg.Config, args) -> int:
     just the money currently sitting in stock, and it reads as a catastrophic
     loss: an interrupted session holding 8 NVDA showed "-$3,060" when its actual
     P&L was -$1.97. Two separate ad-hoc queries made that mistake, so the
-    correct calculation lives here instead of being retyped.
+    calculation lives in `eval/pnl.py` and every caller uses that one.
 
     P&L = (cash + positions marked to market) - starting capital.
     """
@@ -151,7 +156,6 @@ def cmd_sessions(config: cfg.Config, args) -> int:
     conn = db.connect(config.db_path, readonly=True)
     try:
         repo = SessionsRepo(conn)
-        marks = repo.marks()
         rows = conn.execute(
             "SELECT * FROM sessions ORDER BY id DESC LIMIT ?", (args.limit,)
         ).fetchall()
@@ -162,10 +166,12 @@ def cmd_sessions(config: cfg.Config, args) -> int:
         print(f"{'id':>3}  {'status':10s} {'capital':>10s} {'equity':>10s} "
               f"{'P&L':>9s}  {'':2s} positions")
         for r in rows:
-            # One calculation, in one place. See SessionsRepo: `cash - capital`
-            # is not P&L, and reading it as P&L has already produced a "-$3,060"
-            # on a session that was down $1.97.
-            money = repo.pnl(r["id"], marks)
+            # One calculation, in one place. `cash - capital` is not P&L, and
+            # reading it as P&L has already produced a "-$3,060" on a session
+            # that was down $1.97. A running session is marked at the current
+            # tape; a finished one at its own clock.
+            at = now_ms() if r["status"] in ("running", "flattening") else None
+            money = eval_pnl.session_pnl(conn, r["id"], at_ms=at)
             positions = repo.positions(r["id"])
             colour = GREEN if money.pnl > 0 else RED if money.pnl < 0 else ""
             flag = "!" if r["status"] in ("halted", "failed") else " "
@@ -198,6 +204,167 @@ def cmd_sessions(config: cfg.Config, args) -> int:
     finally:
         conn.close()
     return 0
+
+
+def cmd_eval(config: cfg.Config, args) -> int:
+    """Score the sessions, with every number's n beside it.
+
+    The point of this command is not the means. It is the exclusions and the
+    required sample size: at four completed sessions any mean here is a rounding
+    of noise, and printing what it would take to know better is the only defence
+    against reading it as a result.
+    """
+    if not config.db_path.exists():
+        print("no database yet", file=sys.stderr)
+        return 1
+
+    conn = db.connect(config.db_path, readonly=True)
+    try:
+        if args.session:
+            return _print_session_eval(conn, args.session)
+
+        rep = eval_report.cohort_report(conn, effect_bp=args.effect_bp)
+        total = len(rep.sessions)
+        usable = sum(1 for m in rep.sessions if m.scorable)
+        print(f"sessions  {total} recorded, {GREEN}{usable} scorable{RESET}, "
+              f"fill tier {rep.tier}")
+        if rep.excluded:
+            print("excluded  " + "  ".join(f"{k}={v}" for k, v in
+                                           sorted(rep.excluded.items())))
+        print()
+
+        print(f"{'arm':10s} {'n':>3s} {'mean bp':>9s} {'median':>9s} {'sd':>8s} "
+              f"{'positive':>9s}")
+        for arm, s in rep.arms.items():
+            print(f"{arm.value:10s} {s.n:>3} "
+                  f"{_num(s.mean_bp):>9s} {_num(s.median_bp):>9s} "
+                  f"{_num(s.sd_bp):>8s} {s.positive:>9}")
+
+        if rep.difference_bp is not None:
+            colour = GREEN if rep.difference_bp > 0 else RED
+            print(f"\ndifference {colour}{rep.difference_bp:+.1f}bp{RESET} "
+                  f"(llm minus baseline), permutation p "
+                  f"{_num(rep.permutation_p, 3)}")
+        else:
+            print(f"\ndifference {DIM}not measurable — one arm has no scorable "
+                  f"sessions{RESET}")
+        print(f"pairs      {rep.pairs}"
+              + (f", sign test p {_num(rep.paired_p, 3)}" if rep.pairs else
+                 f" {DIM}(unpaired: nothing links a session to its control){RESET}"))
+        if rep.sessions_needed:
+            print(f"{YELLOW}needed     {rep.sessions_needed} sessions per arm to "
+                  f"detect {rep.effect_bp:.0f}bp{RESET}")
+
+        if rep.flat_rate:
+            rate, ci = rep.flat_rate
+            print(f"\nflat rate  {rate * 100:.0f}%"
+                  + (f" [{ci[0] * 100:.0f}%, {ci[1] * 100:.0f}%]" if ci else ""))
+
+        lv = rep.level_slippage
+        if lv["n"]:
+            print(f"\nlevels fired {int(lv['n'])}: median miss "
+                  f"{_num(lv['total_bp_median'])}bp "
+                  f"(tape {_num(lv['detect_bp_median'])}bp + "
+                  f"fill model {_num(lv['model_bp_median'])}bp), "
+                  f"p95 {_num(lv['total_bp_p95'])}bp")
+        late = rep.lateness_ms
+        if late["n"]:
+            print(f"lateness     p50 {_num(late['p50_ms'], 0)}ms  "
+                  f"p95 {_num(late['p95_ms'], 0)}ms "
+                  f"{DIM}(an enforced stop is not a venue stop){RESET}")
+
+        c = rep.conviction
+        print(f"\nconviction {c.n} closed episodes"
+              + (f", tau {c.tau:+.2f}" if c.tau is not None else
+                 f" {DIM}(too few to correlate){RESET}"))
+        for level, b in c.buckets.items():
+            print(f"  {level:>2}: n={int(b['n']):<3} wins={int(b['wins']):<3} "
+                  f"net {b['net']:+.2f}")
+
+        for note in rep.notes:
+            print(f"\n{YELLOW}note{RESET} {note}")
+    finally:
+        conn.close()
+    return 0
+
+
+def _print_session_eval(conn, session_id: int) -> int:
+    rep = eval_report.session_report(conn, session_id)
+    m, money = rep.meta, rep.money
+    print(f"session   #{m.id} {m.status}  arm={m.arm.value}  "
+          f"tier={'/'.join(m.tiers) or 'none'}")
+    if m.excluded:
+        print(f"{YELLOW}excluded{RESET}  {', '.join(m.excluded)}")
+    colour = GREEN if money.pnl > 0 else RED if money.pnl < 0 else ""
+    print(f"P&L       {colour}{money.pnl:+,.2f}{RESET} "
+          f"({money.pnl_bp:+.0f}bp)"
+          + ("" if money.realised else f" {YELLOW}unrealised{RESET}"))
+    print(f"gross     {money.gross:+,.2f} before {money.costs:,.4f} of costs")
+    print(f"costs     {_num(rep.costs.bp_of_notional)}bp of notional, "
+          f"breakeven {rep.costs.breakeven_bp:.1f}bp, "
+          f"{rep.costs.round_trips} round trips")
+    if rep.flat_reason:
+        print(f"{YELLOW}flat{RESET}      {rep.flat_reason}")
+
+    wr = rep.win_rate
+    if wr:
+        rate, ci = wr
+        print(f"win rate  {rate * 100:.0f}%"
+              + (f" [{ci[0] * 100:.0f}%, {ci[1] * 100:.0f}%]" if ci else "")
+              + f"  median hold {_num(rep.median_hold_s, 0)}s"
+              + f"  turnover {rep.turnover:.2f}x")
+
+    if rep.by_exit:
+        print("\nexits")
+        for kind, b in sorted(rep.by_exit.items()):
+            print(f"  {kind:12s} n={int(b['n']):<3} wins={int(b['wins']):<3} "
+                  f"net {b['net']:+.2f}")
+    d = rep.discipline
+    print(f"\nentries   {d['armed']} armed at a level, {d['at_market']} at market"
+          + (f", {RED}{d['unprotected']} unprotected{RESET}"
+             if d["unprotected"] else ""))
+    if rep.unprotected:
+        print(f"{RED}no plan{RESET}   {', '.join(rep.unprotected)}")
+
+    a = rep.armed
+    if a.triggered or a.expired or a.cancelled:
+        print(f"armed     {a.triggered} printed, {a.expired} expired, "
+              f"{a.cancelled} cancelled"
+              + (f", hit rate {a.hit_rate * 100:.0f}%"
+                 if a.hit_rate is not None else "")
+              + (f", distances {a.distances_bp}bp" if a.distances_bp else ""))
+
+    for f in rep.levels:
+        print(f"  {f.kind:9s} {f.symbol} level {f.level:.2f} -> {f.fill_price:.2f}  "
+              f"miss {f.total_bp:+.1f}bp (tape {f.detect_bp:+.1f} + model "
+              f"{f.model_bp:+.1f})"
+              + (f", late {f.late_ms}ms" if f.late_ms is not None else "")
+              + (f" {DIM}[trailed, level approximate]{RESET}" if f.trailed else ""))
+
+    blind = [b for b in rep.blindness if b.blind_s > 0]
+    if blind:
+        print(f"\n{YELLOW}blind{RESET}     " + ", ".join(
+            f"{b.symbol} {b.blind_s:.0f}s ({b.blind_pct:.0f}%)" for b in blind)
+            + f"  {DIM}levels could not be enforced during this{RESET}")
+
+    mu = rep.model
+    print(f"\nmodel     {mu.calls} calls, p50 {_num(mu.p50_ms, 0)}ms, "
+          f"p95 {_num(mu.p95_ms, 0)}ms"
+          + (f", {RED}{mu.errors} errors{RESET}" if mu.errors else "")
+          + (f", {RED}{mu.unparsed_ticks} unparsed ticks{RESET}"
+             if mu.unparsed_ticks else ""))
+    if mu.thinking_share is not None:
+        print(f"          {mu.thinking_share * 100:.0f}% of the session spent "
+              f"waiting on the model")
+    if rep.rejections:
+        print("\nrejected")
+        for reason, n in rep.rejections.items():
+            print(f"  {n:>3}  {reason}")
+    return 0
+
+
+def _num(value: float | None, places: int = 1) -> str:
+    return "-" if value is None else f"{value:.{places}f}"
 
 
 def cmd_uptime(config: cfg.Config, args) -> int:
@@ -277,12 +444,19 @@ def main(argv: list[str] | None = None) -> int:
     u.add_argument("--max-gap-min", type=int, default=10)
     u.add_argument("--json", action="store_true")
 
+    e = sub.add_parser("eval", help="score the sessions, with every n printed")
+    e.add_argument("session", nargs="?", type=int,
+                   help="one session in detail; omit for the cohort")
+    e.add_argument("--effect-bp", type=float,
+                   default=eval_report.DEFAULT_EFFECT_BP,
+                   help="the difference worth detecting, for the sample-size line")
+
     args = p.parse_args(argv)
     config = cfg.load(mode=cfg.Mode.PAPER)
 
     return {
         "status": cmd_status, "kill": cmd_kill, "sessions": cmd_sessions,
-        "release": cmd_release, "uptime": cmd_uptime,
+        "release": cmd_release, "uptime": cmd_uptime, "eval": cmd_eval,
     }[args.cmd](config, args)
 
 

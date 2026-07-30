@@ -38,6 +38,8 @@ Windows: `powershell -ExecutionPolicy Bypass -File setup.ps1`
 ```bash
 uv run tradectl status      # is the engine alive
 uv run tradectl sessions    # scoreboard with CORRECT P&L
+uv run tradectl eval        # scored cohort: arms, exclusions, required n
+uv run tradectl eval 7      # one session in detail
 uv run tradectl uptime      # feed reliability
 touch ~/.thepit/state/KILL  # emergency stop, works when everything else is wedged
 ```
@@ -58,6 +60,8 @@ agent/      claude.py (CLI subprocess), stub.py (deterministic baseline)
 session/    config.py, prompt.py, runner.py — plan/tick/flatten/review
             fastloop.py — enforces those levels every 5s, no model in the path
 api/        FastAPI, endpoints, WebSocket
+eval/       measurement, read-only: pnl.py owns THE P&L, cohort.py owns what is
+            scorable, enforcement.py puts a number on "a stop here is late"
 web/        single-page dashboard, vendored uPlot
 docs/NOTES.md   methodology and honest limits. Read before eval work.
 ```
@@ -88,8 +92,15 @@ loses to costs, skipping loses to inaction — so neither reads as safe.
 
 **P&L is never `cash - capital`.** While a position is open that difference is
 just money sitting in stock. An interrupted session showed "−$3,060" when its
-real P&L was −$1.97. Two separate ad-hoc queries made that mistake. Use
-`tradectl sessions`, or compute `(cash + positions marked to market) - capital`.
+real P&L was −$1.97. Two separate ad-hoc queries made that mistake. There is now
+exactly one implementation — `eval/pnl.py:session_pnl` — and tradectl, the API and
+the dashboard all call it. Do not write a fourth.
+
+**A number that needs a level's history cannot come from `exit_plans`.** That
+table is keyed by symbol and upserted, so a session that stopped out and
+re-entered has one row describing only the last state. Measuring both fires
+against it reported 112 seconds of lateness for a loop that acted inside one
+second. `exit_plan_events` is the append-only history; use it.
 
 **Whole-share sizing does not work.** At $20 with a $4 cap, `int(4 / 194)` is 0.
 Every order is unaffordable and the session silently does nothing. Fractional
@@ -146,11 +157,19 @@ before the API can see the tables.
 
 ## State
 
-Paper trading works end to end. Ten sessions logged; four completed, one
-positive. Yahoo prices and SEC filings recording continuously.
+Paper trading works end to end, with levels enforced between ticks. Yahoo prices
+and SEC filings recording continuously. `tradectl eval` scores what has run.
 
 Not done: Alpaca for a real bid/ask (#11), Claude Design UI (#12), live-money
-arming, eval module.
+arming, a standalone `flatten.py`.
+
+The eval module exists and its own report says what it still cannot measure. The
+biggest gap is the one that matters most: **nothing spawns the baseline twin**, so
+`run_baseline` is recorded and never acted on and the LLM-versus-baseline
+comparison is unpaired. Second is blinding — `prompt._label_for` relabels symbols
+for display only, the order path never inverts the mapping, so a blinded session's
+orders can only be rejected. Both are listed in the report's own notes rather than
+quietly producing a number.
 
 **Never enable live trading, enter broker credentials, or run a live session.**
 That is Baron's action alone. The code path exists and is exercised against

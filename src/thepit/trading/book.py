@@ -97,6 +97,9 @@ class Fill:
     ref_price: float    # the quote it was priced from
     cost: float         # modeled slippage in dollars
     tier: str
+    # Set once the order exists, so a caller can attribute what it just did
+    # without matching the wording of a reason string.
+    order_id: int | None = None
 
 
 class Book:
@@ -168,8 +171,14 @@ class Book:
 
     # -- fills ---------------------------------------------------------------
 
-    def apply(self, fill: Fill, ts_ms: int, order_id: int) -> None:
-        """Book a fill. Updates cash, position, and realized P&L."""
+    def apply(self, fill: Fill, ts_ms: int, order_id: int,
+              *, quote_ts_ms: int | None = None) -> None:
+        """Book a fill. Updates cash, position, and realized P&L.
+
+        `quote_ts_ms` records WHICH quote priced this, not just its value, which
+        is what turns "how late was that stop" from an estimate into something
+        measurable against the recorded tape.
+        """
         signed = fill.qty if fill.side == "buy" else -fill.qty
         prior = self.positions.get(fill.symbol)
         cash_delta = -signed * fill.price
@@ -204,9 +213,9 @@ class Book:
         with db.immediate(self._conn):
             self._conn.execute(
                 "INSERT INTO fills (order_id,session_id,ts_ms,symbol,side,qty,price,"
-                "ref_price,cost,sim_tier) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                "ref_price,cost,sim_tier,quote_ts_ms) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (order_id, self.session_id, ts_ms, fill.symbol, fill.side, fill.qty,
-                 fill.price, fill.ref_price, fill.cost, fill.tier),
+                 fill.price, fill.ref_price, fill.cost, fill.tier, quote_ts_ms),
             )
             self._conn.execute(
                 "INSERT INTO positions (session_id,symbol,qty,avg_price,realized) "

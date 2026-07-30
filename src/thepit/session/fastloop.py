@@ -93,6 +93,10 @@ class FastLoop:
         positions: Callable[[], dict[str, Position]],
         submit: SubmitFn,
         say: SayFn,
+        # Called once per pass so the equity curve exists even for a session that
+        # never traded. It used to be written only after a fill, so a flat session
+        # had no curve at all and the last row always predated the flatten.
+        snapshot: Callable[[int], object] | None = None,
         interval_s: float = 5.0,
         round_trip_cost_bp: float = 3.0,
         max_quote_age_s: float = MAX_QUOTE_AGE_S,
@@ -104,6 +108,7 @@ class FastLoop:
         self._positions = positions
         self._submit = submit
         self._say = say
+        self._snapshot = snapshot
         self.interval_s = interval_s
         self._cost_bp = round_trip_cost_bp
         self._max_age_s = max_quote_age_s
@@ -194,7 +199,7 @@ class FastLoop:
         # Re-apply the ratchet. An amendment may tighten a trailed stop; it must
         # not be a way to loosen one back to a level the trail already passed.
         plan = plan.trailed(plan.high_water)
-        self._write(plan)
+        self._write(plan, "amended")
         self._say("levels", "REVISED " + self.describe(plan))
         return plan, None
 
@@ -315,6 +320,8 @@ class FastLoop:
         positions = self._positions()
         acted: list[str] = []
         self.ticks += 1
+        if self._snapshot is not None:
+            self._snapshot(now)
 
         for plan in self.plans():
             held = positions.get(plan.symbol)
@@ -339,7 +346,7 @@ class FastLoop:
 
             moved = plan.trailed(price)
             if moved.stop_price != plan.stop_price or moved.high_water != plan.high_water:
-                self._write(moved)
+                self._write(moved, "trailed")
                 if moved.stop_price != plan.stop_price:
                     acted.append(f"trail:{plan.symbol}")
                     self._say("levels", f"{plan.symbol} trailing stop raised to "
@@ -393,7 +400,7 @@ class FastLoop:
         fill = self._submit(
             {"symbol": plan.symbol, "side": plan.close_side, "qty": abs(qty),
              "reason": f"fast loop {hit.kind}: {hit.detail}"[:200]},
-            can_open=False,
+            can_open=False, origin=f"fast_loop_{hit.kind}",
         )
         if fill is None:
             # The plan stays ACTIVE. Marking it fired here was worse than the
@@ -409,6 +416,8 @@ class FastLoop:
             "updated_ms=? WHERE session_id=? AND symbol=?",
             (now, f"{hit.kind}: {hit.detail}", now, self._sid, plan.symbol))
         self._conn.commit()
+        self._event(plan.symbol, "fired", now, plan=plan,
+                    detail=f"{hit.kind}: {hit.detail}")
         return True
 
     def _fill_armed(self, entry: Armed, price: float, now: int) -> None:
@@ -417,13 +426,18 @@ class FastLoop:
         fill = self._submit(
             {"symbol": entry.symbol, "side": entry.side, "qty": entry.qty,
              "reason": f"armed at {entry.trigger_price:.2f}: {entry.reason}"[:200],
-             "conviction": entry.conviction},
-            can_open=True,
+             "conviction": entry.conviction,
+             "stop": entry.levels.stop_price, "stop_bp": entry.levels.stop_bp,
+             "target": entry.levels.target_price, "target_bp": entry.levels.target_bp,
+             "trigger": entry.trigger_price},
+            can_open=True, origin="armed",
         )
         if fill is None:
             self._resolve_entry(entry.id, "cancelled", now)
             return
-        self._resolve_entry(entry.id, "triggered", now)
+        # The order id, not just the status. Attribution used to depend on
+        # matching the wording of the reason string.
+        self._resolve_entry(entry.id, "triggered", now, order_id=fill.order_id)
         self.protect(fill, entry.levels)
 
     def protect(self, fill: Fill, levels: lv.Levels) -> lv.ExitPlan | None:
@@ -448,7 +462,7 @@ class FastLoop:
         unwound = self._submit(
             {"symbol": fill.symbol, "side": "sell" if fill.side == "buy" else "buy",
              "qty": fill.qty, "reason": f"unprotected fill: {error}"[:200]},
-            can_open=False,
+            can_open=False, origin="unprotected",
         )
         if unwound is None:
             # Do not let "Closing immediately" stand as a claim about something
@@ -458,21 +472,49 @@ class FastLoop:
                                f"open with no exit plan — close it by hand.")
         return None
 
-    def _resolve_entry(self, entry_id: int, status: str, now: int) -> None:
+    def _event(self, symbol: str, kind: str, ts_ms: int, *,
+               plan: lv.ExitPlan | None = None, detail: str | None = None) -> None:
+        """Append one line of a level's history.
+
+        Append-only, because `exit_plans` is upserted per symbol and therefore
+        cannot answer "what was the stop when that fill happened". Measuring a
+        fire against a level set after it produced a 112-second lateness figure for
+        a loop that acted in under a second.
+        """
         self._conn.execute(
-            "UPDATE pending_entries SET status=?, resolved_ms=? WHERE id=?",
-            (status, now, entry_id))
+            "INSERT INTO exit_plan_events (session_id,symbol,ts_ms,kind,long,"
+            "entry_price,stop_price,target_price,trail_bp,high_water,detail) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (self._sid, symbol, ts_ms, kind,
+             None if plan is None else (1 if plan.long else 0),
+             None if plan is None else plan.entry_price,
+             None if plan is None else plan.stop_price,
+             None if plan is None else plan.target_price,
+             None if plan is None else plan.trail_bp,
+             None if plan is None else plan.high_water,
+             detail))
+        self._conn.commit()
+
+    def _resolve_entry(self, entry_id: int, status: str, now: int,
+                       *, order_id: int | None = None) -> None:
+        self._conn.execute(
+            "UPDATE pending_entries SET status=?, resolved_ms=?, "
+            "order_id=COALESCE(?, order_id) WHERE id=?",
+            (status, now, order_id, entry_id))
         self._conn.commit()
 
     def _close_plan(self, symbol: str, now: int) -> None:
-        self._conn.execute(
+        cur = self._conn.execute(
             "UPDATE exit_plans SET status='closed', updated_ms=? "
             "WHERE session_id=? AND symbol=? AND status='active'",
             (now, self._sid, symbol))
         self._conn.commit()
+        if cur.rowcount:
+            self._event(symbol, "closed", now)
 
-    def _write(self, plan: lv.ExitPlan) -> None:
+    def _write(self, plan: lv.ExitPlan, kind: str = "attached") -> None:
         now = self._clock.now_ms()
+        self._event(plan.symbol, kind, now, plan=plan)
         self._conn.execute(
             "INSERT INTO exit_plans (session_id,symbol,created_ms,updated_ms,long,"
             "entry_price,stop_price,target_price,trail_bp,time_stop_ms,high_water,"

@@ -51,7 +51,8 @@ from thepit.session.prompt import build_plan_prompt
 from thepit.session.runner import SessionRunner
 from thepit.agent import claude as claude_mod
 from thepit.core.types import FeedTier, Quote
-from thepit.store.repos import BarsRepo, FetchLogRepo, NewsRepo, SessionsRepo
+from thepit.eval import pnl as eval_pnl
+from thepit.store.repos import BarsRepo, FetchLogRepo, NewsRepo
 
 WEB_DIR = Path(__file__).resolve().parents[3] / "web"
 
@@ -327,8 +328,10 @@ def create_app(config: cfg.Config, *, allow_control: bool) -> FastAPI:
                 "SELECT * FROM positions WHERE session_id=?", (sid,))]
             # The shared calculation, not a third local copy of it. The two
             # earlier ad-hoc versions are what produced a "-$3,060" P&L on a
-            # session that was down $1.97.
-            money = SessionsRepo(c).pnl(sid)
+            # session that was down $1.97. A live session is marked at the
+            # current tape; a finished one at its own clock.
+            live = s_row["status"] in ("running", "flattening")
+            money = eval_pnl.session_pnl(c, sid, at_ms=now_ms() if live else None)
 
             stale = (
                 s_row["status"] in ("running", "flattening")

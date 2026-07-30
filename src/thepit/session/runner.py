@@ -18,6 +18,7 @@ import contextlib
 import json
 import logging
 import sqlite3
+from dataclasses import replace
 
 from thepit.agent import claude, stub
 from thepit.core.clock import Clock
@@ -114,6 +115,10 @@ class SessionRunner:
         # Said once per episode. At a one-second cadence the alternative buries
         # the activity log in the same line.
         self._blind_noted = False
+        # The decision an order belongs to. Recorded on the order rather than
+        # inferred from timestamps, which stopped working the moment the fast
+        # loop began submitting between ticks.
+        self._decision_id: int | None = None
         # When true, decisions come from the deterministic rule instead of a
         # model. This is both the fallback when the CLI is unavailable and the
         # control group the LLM has to beat.
@@ -168,10 +173,14 @@ class SessionRunner:
     def create(self) -> int:
         now = self._clock.now_ms()
         cur = self._conn.execute(
-            "INSERT INTO sessions (created_ms,ends_ms,status,config,capital,cash) "
-            "VALUES (?,?,'planned',?,?,?)",
+            "INSERT INTO sessions (created_ms,ends_ms,status,config,capital,cash,"
+            "universe) VALUES (?,?,'planned',?,?,?,?)",
             (now, now + self._cfg.duration_minutes * 60_000,
-             json.dumps(_config_json(self._cfg)), self._cfg.capital, self._cfg.capital),
+             json.dumps(_config_json(self._cfg)), self._cfg.capital, self._cfg.capital,
+             # The symbols actually passed to this runner. `config.symbols` is
+             # empty on the default path, so the universe a session traded used
+             # to be recoverable only from the text of its plan prompt.
+             json.dumps(list(self._symbols))),
         )
         self._conn.commit()
         self.session_id = int(cur.lastrowid)
@@ -180,8 +189,10 @@ class SessionRunner:
             self._conn, self._clock, self.session_id,
             quotes=lambda: self._quotes,
             positions=lambda: self.book.positions,
-            submit=lambda proposal, can_open: self._submit(proposal, can_open=can_open),
+            submit=lambda proposal, can_open, origin="model": self._submit(
+                proposal, can_open=can_open, origin=origin),
             say=self.say,
+            snapshot=self._snapshot_equity,
             interval_s=self._cfg.fast_loop_seconds,
             round_trip_cost_bp=self._cost_bp() or 3.0,
         )
@@ -281,6 +292,9 @@ class SessionRunner:
         pnl = eq - self._cfg.capital
         now = self._clock.now_ms()
         originating = self._halted
+        # The last curve point must be the final equity. Without this the newest
+        # `equity` row always predates the flatten.
+        self._snapshot_equity(now)
 
         if not stuck:
             if originating:
@@ -569,38 +583,51 @@ class SessionRunner:
 
         Written to `orders` as rejected rather than dropped, for the same reason
         risk rejections are kept: "what did it want to do that it was not allowed
-        to do" is the more interesting question.
+        to do" is the more interesting question. The intended levels are stored
+        with it, so the counterfactual is at least priceable later.
         """
+        levels, _ = lv.parse(proposal)
         self._conn.execute(
             "INSERT INTO orders (session_id,ts_ms,symbol,side,qty,status,reason,"
-            "reject_reason,conviction) VALUES (?,?,?,?,?,'rejected',?,?,?)",
+            "reject_reason,conviction,origin,decision_id,stop_price,target_price,"
+            "trigger_price) VALUES (?,?,?,?,?,'rejected',?,?,?,?,?,?,?,?)",
             (self.session_id, self._clock.now_ms(),
              str(proposal.get("symbol", "")).upper(),
              "buy" if str(proposal.get("side", "")).lower() != "sell" else "sell",
              max(_qty(proposal), 0.0001), str(proposal.get("reason", ""))[:200],
-             reason, _conviction(proposal)),
+             reason, _conviction(proposal), "model", self._decision_id,
+             levels.stop_price, levels.target_price, levels.trigger_price),
         )
         self._conn.commit()
         self.say("order", f"REJECTED {proposal.get('side')} "
                           f"{proposal.get('symbol')} — {reason}")
 
-    def _submit(self, proposal: dict, *, can_open: bool) -> Fill | None:
+    def _submit(self, proposal: dict, *, can_open: bool,
+                origin: str = "model") -> Fill | None:
         """The only path from a proposal to a fill. Every order passes the risk
         check here; there is no other writer of `orders`.
 
         Returns the fill so the caller can attach exit levels to the price that
-        was actually paid rather than the quote the decision was made on."""
+        was actually paid rather than the quote the decision was made on.
+
+        `origin` is recorded rather than inferred. It used to be recoverable only
+        by matching the wording of a reason string, which made every attribution
+        in the history one edit away from silently becoming 'model'."""
         now = self._clock.now_ms()
         symbol = str(proposal.get("symbol", "")).upper()
         side = str(proposal.get("side", "")).lower()
         qty = _qty(proposal)
         reason = str(proposal.get("reason", ""))[:200]
         conviction = _conviction(proposal)
+        levels, _ = lv.parse(proposal)
 
         cur = self._conn.execute(
             "INSERT INTO orders (session_id,ts_ms,symbol,side,qty,status,reason,"
-            "conviction) VALUES (?,?,?,?,?,'proposed',?,?)",
-            (self.session_id, now, symbol, side, max(qty, 0.0001), reason, conviction),
+            "conviction,origin,decision_id,stop_price,target_price,trigger_price) "
+            "VALUES (?,?,?,?,?,'proposed',?,?,?,?,?,?,?)",
+            (self.session_id, now, symbol, side, max(qty, 0.0001), reason, conviction,
+             origin, self._decision_id, levels.stop_price, levels.target_price,
+             levels.trigger_price),
         )
         order_id = int(cur.lastrowid)
 
@@ -634,7 +661,7 @@ class SessionRunner:
 
         assert quote is not None
         fill = simulate_fill(side, qty, quote, self._tier)
-        self.book.apply(fill, now, order_id)
+        self.book.apply(fill, now, order_id, quote_ts_ms=quote.ts_ms)
         self._conn.execute(
             "UPDATE orders SET status='filled', filled_qty=?, avg_fill=? WHERE id=?",
             (qty, fill.price, order_id),
@@ -643,7 +670,7 @@ class SessionRunner:
         self._snapshot_equity(now)
         self.say("fill", f"FILLED {side} {qty:g} {symbol} @ {fill.price:.2f} "
                          f"(cost ${fill.cost:.2f})")
-        return fill
+        return replace(fill, order_id=order_id)
 
     async def _flatten_until_flat(self, *, deadline_ms: int) -> list[str]:
         """Keep trying to close everything until flat or out of time.
@@ -698,7 +725,7 @@ class SessionRunner:
             self._submit(
                 {"symbol": symbol, "side": "sell" if pos.qty > 0 else "buy",
                  "qty": abs(pos.qty), "reason": "session flatten"},
-                can_open=False,
+                can_open=False, origin="flatten",
             )
         return [s for s, p in self.book.positions.items() if abs(p.qty) > 1e-9]
 
@@ -832,6 +859,7 @@ class SessionRunner:
             (self.session_id, self._clock.now_ms(), phase, prompt),
         )
         decision_id = int(cur.lastrowid)
+        self._decision_id = decision_id
         self._conn.commit()
 
         label = {"plan": "Asking the model for a plan",
@@ -968,5 +996,9 @@ def _config_json(cfg: SessionConfig) -> dict:
         "session_loss_limit_pct": cfg.session_loss_limit_pct,
         "model": cfg.model, "effort": cfg.effort,
         "research": cfg.research.value, "blinding": cfg.blinding.value,
+        # Recorded even though nothing spawns the twin yet: without it in the
+        # config JSON, a later eval cannot tell an unpaired session from one whose
+        # control was requested and never ran.
+        "run_baseline": cfg.run_baseline,
         "notes": cfg.notes,
     }

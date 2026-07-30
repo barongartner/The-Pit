@@ -58,6 +58,33 @@ Two conservative choices inside it, both to keep the paper result from
 flattering: a breach is checked before a trailing stop is raised, and a stop and
 a target reachable in the same interval resolve as the stop.
 
+## What the eval module refuses to answer
+
+`tradectl eval` prints exclusions before it prints means, and withholds numbers
+the sample cannot support: no standard deviation under five sessions, no rank
+correlation under twenty closed episodes, no cost-drag ratio on a losing session
+(where `costs / gross` is negative and reads as a benefit). Every rate carries a
+Wilson interval, and the arm comparison carries the sessions-per-arm the observed
+spread would actually need.
+
+Sessions are excluded, not adjusted, when: the arm is unknown (a session that died
+before its first model call has no decisions and must not be counted as an LLM
+run), the cash rebuilt from fills disagrees with the cached balance, a held symbol
+has no tick at or before the mark instant, or fill tiers are mixed. That last one
+raises rather than averaging.
+
+Structurally unanswerable today, and stated in the report rather than fudged:
+
+- **LLM versus baseline on the same tape.** Nothing links a session to its
+  control; the twin is never spawned. Pairing is by overlapping clock and
+  universe, which is a substitute, not a control.
+- **Reasoning versus recall.** The blinded arms cannot execute at all: the label
+  mapping is display-only and never inverted in the order path.
+- **Per-trade news attribution.** Headlines are interpolated into the prompt; no
+  `news.id` is stored against a decision.
+- **The counterfactual of a rejected order.** Intended levels are now recorded on
+  rejections, but pricing what would have happened needs a replay harness.
+
 ## Backtests are contaminated
 
 The model knows what happened before its training cutoff. No amount of care
