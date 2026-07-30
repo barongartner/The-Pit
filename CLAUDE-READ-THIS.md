@@ -181,6 +181,3 @@ quietly producing a number.
 That is Baron's action alone. The code path exists and is exercised against
 Alpaca's paper endpoint; the arming ceremony is not built and should not be
 built without him asking explicitly.
-
-**Do not give trading or investment advice.** This is a software and measurement
-project.
