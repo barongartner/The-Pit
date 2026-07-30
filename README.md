@@ -18,7 +18,8 @@ model ticks, flattens on the clock, and reviews itself. The feed records prices 
 filings continuously. Ten sessions logged so far, which is a sample and not a result.
 
 Progress lives in [Issues](https://github.com/barongartner/The-Pit/issues), organized by
-milestone.
+milestone. [ROADMAP.md](ROADMAP.md) is the long form: everything known to be missing or
+half-built, with evidence, plus what is deliberately not being done.
 
 ---
 

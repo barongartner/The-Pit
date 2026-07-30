@@ -5,6 +5,12 @@ Everything you need to know about this project before touching it.
 Claude Code auto-loads `CLAUDE.md` by filename, so that file is a one-line
 pointer here. This is the real document.
 
+**Then read [ROADMAP.md](ROADMAP.md) before choosing what to work on.** This file
+is the memory — what has been learned and paid for. That one is the forward list:
+~200 entries with evidence, a sequenced critical path, the working agreement for
+claiming work and migration numbers, and a register of the claims in these
+documents that are not yet true.
+
 ## What this is
 
 **The Pit** runs Claude-powered trading agents in bounded paper-trading sessions
