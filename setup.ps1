@@ -27,6 +27,12 @@ if (Get-Command git -ErrorAction SilentlyContinue) {
     exit 1
 }
 
+# --- git hooks -------------------------------------------------------------
+# .git/hooks is not tracked, so the hooks live in .githooks and git is pointed
+# at them. Without this the post-merge reminder never fires on this machine.
+git config core.hooksPath .githooks
+Ok "git hooks enabled (post-merge reminder)"
+
 # --- uv --------------------------------------------------------------------
 # Manages Python itself, so there is no separate Python install step and the
 # system Python is left alone.

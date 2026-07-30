@@ -104,7 +104,7 @@ separately is how a third of a system gets built and called done.
 
 - [ ] **1. Get sessions out of the API process** · large · unblocks six other entries
 - [ ] **2. Migration 007, the whole measurement column set** · medium
-- [ ] **3. Spawn the baseline twin** · large · highest value on the list
+- [~] 2026-07-30 **3. Spawn the baseline twin** · large · highest value on the list
 - [ ] **4. Record a shakedown cohort** · medium
 - [ ] **5. Database lifecycle: retention, compaction, size, backup, restore** · medium
 - [ ] **6. One flatten.py brake** · medium

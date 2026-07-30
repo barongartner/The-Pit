@@ -147,6 +147,31 @@ before the API can see the tables.
   diagnostic burst once produced 429s that looked exactly like an IP ban and
   was not.
 
+## Bookkeeping is part of the work, not admin
+
+Two machines, two Claude sessions. The failure mode is not bad code, it is two
+sessions doing the same entry, or work landing with no record anywhere. So:
+
+**Every piece of work gets both a ROADMAP.md box and a GitHub issue.** Not one or
+the other. The roadmap is the sequenced list a session reads before starting; the
+issues are the record Baron can see from his phone.
+
+1. **Claim before you code.** Mark the box `[~]` with today's date in ROADMAP.md
+   and commit that first. An unclaimed entry is an invitation to duplicate it.
+2. **Open a GitHub issue** for what you are about to do, and for anything you find
+   on the way. `gh issue create -R barongartner/The-Pit`. Findings go in the
+   issue tracker, not into your branch as unrequested scope.
+3. **Claim the migration number in ROADMAP.md before writing the .sql.**
+   `db._migration_files` asserts they are gapless, so two sessions both writing
+   `007_*.sql` means the system refuses to boot.
+4. **When it lands:** tick `[x]`, update the progress count at the top of the
+   checklist, and close the issue -- a `fixes #N` commit trailer does that
+   automatically.
+
+`.githooks/post-merge` prints this after every `git pull`, along with anything
+currently claimed and the highest migration on disk. It is enabled by
+`git config core.hooksPath .githooks`, which `setup.ps1` runs.
+
 ## Working with Baron
 
 - **Be brief.** He got overwhelmed by long explanations mid-project and said so.
