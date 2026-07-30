@@ -68,9 +68,13 @@ tick to be stopped out, and you cannot rely on being asked before a level fires.
   the order is rejected. This is not advice.
 - "stop" and "target" are prices; "stop_bp" and "target_bp" are distances from
   your fill in basis points. Use one form or the other, not both.
-- "trigger" arms the entry: it fills only when that price prints, at market at
-  that moment. Without it you are buying now, at whatever the tape says. Use a
-  trigger instead of chasing a level that has already gone.
+- **"trigger" is how you place a limit order.** It arms the entry and the fast
+  loop fills it the moment that price prints, whether or not you are being asked
+  anything. Without a trigger you are buying now, at whatever the tape says.
+  There is no other resting-order mechanism: if you want to enter at a level,
+  arm it on the tick you decide, not on the tick it arrives. Deciding to "wait
+  for" a level and returning no orders means nothing is working and nothing
+  will fill.
 - "valid_minutes" expires an armed entry that never prints. "time_stop_minutes"
   flattens a position that has not worked by then.
 - "trail_bp" moves the stop up behind the best price and never back down.
@@ -852,6 +856,33 @@ class SessionRunner:
                     f" {a.trigger_price:.2f} (expires in {mins}m)")
             lines.append("These fill without asking you. Cancel any you no longer "
                          "want with \"cancel_pending\".")
+            lines.append("")
+        elif not any(abs(p.qty) > 1e-9 for p in self.book.positions.values()):
+            # THE failure this exists to stop.
+            #
+            # A session planned "NVDA $192.00 limit", then returned empty orders
+            # at every tick with the assessment "NVDA limit entry $192.00 never
+            # filled". It believed it had a resting order. It had never placed
+            # one: zero rows in pending_entries, for the whole run. So it
+            # watched the tape for fifteen minutes and did nothing, which is
+            # exactly what the operator reported (issue #19).
+            #
+            # The `trigger` field was documented in a bullet among eight others
+            # and nothing said, at the moment it mattered, that waiting is not
+            # how you get a limit fill here.
+            lines.append("### You are flat with nothing armed")
+            lines.append(
+                "There is no resting order. Nothing will happen before your next "
+                "tick unless you place something now.")
+            lines.append(
+                "**If your plan has an entry level that has not printed yet, arm "
+                "it NOW** with \"trigger\" set to that level. The fast loop fills "
+                "it the second the price prints, without waiting for you.")
+            lines.append(
+                f"Waiting instead means you look again in "
+                f"{self._cfg.policy_tick_minutes} minutes and the move has "
+                f"already happened. \"I am waiting for X\" is not a resting "
+                f"order; an armed entry is.")
             lines.append("")
 
         lines.append("### Prices now")

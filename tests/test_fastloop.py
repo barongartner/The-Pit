@@ -636,3 +636,32 @@ def test_the_baseline_states_its_exits_as_levels_so_the_fast_loop_runs_them(conn
     orders = json.loads(text)["orders"]
     assert orders, "the baseline found no trade on a 100bp move"
     assert all("stop_bp" in o and "target_bp" in o for o in orders)
+
+
+async def test_a_flat_session_with_nothing_armed_is_told_to_arm(runner):
+    """Issue #19: "it watched the stock market the whole time, nothing happens."
+
+    A session planned "NVDA $192.00 limit" and then returned empty orders at
+    every tick, assessing "NVDA limit entry $192.00 never filled". It believed it
+    had a resting order. `pending_entries` was empty for the entire run -- it had
+    never placed one.
+
+    The `trigger` field was documented in a bullet among eight others, and
+    nothing said at the moment it mattered that waiting is not how a limit fill
+    happens here.
+    """
+    prompt = runner._tick_prompt(5)  # noqa: SLF001
+
+    assert "flat with nothing armed" in prompt
+    assert "arm" in prompt.lower() and "trigger" in prompt
+    assert "not a resting order" in prompt
+    # It must say what waiting actually costs, in the session's own units.
+    assert f"{runner._cfg.policy_tick_minutes} minutes" in prompt  # noqa: SLF001
+
+
+async def test_the_arm_now_nudge_disappears_once_something_is_working(runner):
+    """It must not nag a session that has already acted, or the prompt trains
+    the model to ignore it."""
+    buy(runner, stop_bp=30)
+    prompt = runner._tick_prompt(5)  # noqa: SLF001
+    assert "flat with nothing armed" not in prompt
