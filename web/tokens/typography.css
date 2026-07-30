@@ -1,0 +1,26 @@
+/* Type.
+ *
+ * Monospace carries every number. On a trading screen a column of prices that
+ * does not align is genuinely harder to read, and proportional digits break the
+ * column the moment a 1 appears. Prose stays in the system sans.
+ */
+:root {
+  --font-sans: -apple-system, "Segoe UI", system-ui, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+
+  --fs-xs:  11px;
+  --fs-sm:  12px;
+  --fs-md:  13px;
+  --fs-lg:  15px;
+  --fs-xl:  20px;
+  --fs-2xl: 28px;
+
+  --fw-regular: 400;
+  --fw-medium:  500;
+  --fw-semibold: 600;
+
+  /* Section headings: small, uppercase, wide-tracked, dim. They label a region
+     without competing with the data inside it. */
+  --label: var(--fw-semibold) var(--fs-xs)/1 var(--font-mono);
+  --label-tracking: .12em;
+}

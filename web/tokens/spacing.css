@@ -1,0 +1,22 @@
+/* Spacing and shape.
+ *
+ * Tight. This is an information display, not a marketing page: whitespace that
+ * pushes the next row below the fold costs more than it buys.
+ */
+:root {
+  --s-1: 4px;
+  --s-2: 6px;
+  --s-3: 8px;
+  --s-4: 12px;
+  --s-5: 16px;
+  --s-6: 22px;
+  --s-7: 32px;
+
+  --radius-sm: 3px;
+  --radius-md: 5px;
+  --radius-lg: 8px;
+
+  /* Hairlines, not shadows. Elevation by luminance keeps the screen flat and
+     readable at a glance; drop shadows on a near-black background just smear. */
+  --hairline: 1px solid var(--border);
+}

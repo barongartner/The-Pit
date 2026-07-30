@@ -1,0 +1,46 @@
+/* The Pit — colour.
+ *
+ * Dark only. Every one of Baron's projects is dark and this one is looked at in
+ * a dim room for an hour at a time.
+ *
+ * The accent is amber rather than a blue or a violet for two reasons. It does
+ * not collide with FreeFlow's #6d4aff, which is the house rule of one accent
+ * hue per app. And more importantly it stays out of the way of the only two
+ * colours that carry meaning here: green is up, red is down. An accent that
+ * reads as either would make the interface lie at a glance.
+ */
+:root {
+  /* Surfaces. Near-black rather than grey: a price that has not changed should
+     be the least visible thing on screen. */
+  --bg-app:    #0a0b0d;
+  --bg-panel:  #121418;
+  --bg-raised: #171a20;
+  --bg-sunken: #08090b;   /* the console, which should read as a terminal */
+  --border:    #23262d;
+  --border-strong: #333842;
+
+  --text:      #e8eaee;
+  --text-sub:  #8b94a3;
+  --text-dim:  #5a6270;
+
+  --accent:      #ff9b3d;
+  --accent-dim:  #3a2a17;
+  --accent-text: #11130f;   /* on an accent fill */
+
+  /* Direction. These two are the only colours in the system that mean
+     something, so nothing else may use them. */
+  --up:      #2ecc84;
+  --up-dim:  #10301f;
+  --down:    #ff5c5c;
+  --down-dim: #3a1c1c;
+
+  /* Mode. PAPER is quiet and LIVE is not: the badge is the last thing between
+     a demonstration and real money, so it is allowed to be ugly. */
+  --paper-bg:   #123a2a;
+  --paper-text: #2ecc84;
+  --paper-line: #1d5c42;
+  --live-bg:    #c02020;
+  --live-text:  #ffffff;
+
+  --warn: #f5c451;
+}

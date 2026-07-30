@@ -539,12 +539,36 @@ def create_app(config: cfg.Config, *, allow_control: bool) -> FastAPI:
 
     if WEB_DIR.exists():
         app.mount("/vendor", StaticFiles(directory=WEB_DIR / "vendor"), name="vendor")
+        # Design tokens, shared verbatim with the "The Pit" project in Claude
+        # Design. Editing a colour there and copying the file here is the whole
+        # workflow -- no build step, one source of truth.
+        app.mount("/tokens", StaticFiles(directory=WEB_DIR / "tokens"), name="tokens")
+
+        @app.get("/styles.css")
+        def styles() -> FileResponse:
+            return FileResponse(WEB_DIR / "styles.css", media_type="text/css")
 
         @app.get("/")
         def index() -> FileResponse:
             return FileResponse(WEB_DIR / "index.html")
 
     return app
+
+
+def _session_open_ms() -> int:
+    """Midnight ET today, in epoch ms.
+
+    Midnight rather than 09:30 so pre-market bars are included in the day's
+    move -- a gap up before the open is part of today, and excluding it would
+    make the first minutes of the session read as a jump out of nowhere.
+    """
+    from datetime import datetime, time as _time
+
+    from thepit.core.calendar import ET
+
+    now_et = datetime.fromtimestamp(now_ms() / 1000, tz=ET)
+    midnight = datetime.combine(now_et.date(), _time(0, 0), tzinfo=ET)
+    return int(midnight.timestamp() * 1000)
 
 
 def _quotes_for(c: sqlite3.Connection, symbols: list[str]) -> dict[str, Quote]:
@@ -644,9 +668,17 @@ def _latest_quotes(
             if r["symbol"] not in symbols:
                 continue
             d = dict(r)
+            # TODAY's first bar, not the first bar ever recorded.
+            #
+            # This used to take the earliest row in the table, so once the
+            # recorder had run for more than a day "Chg" was a multi-day move
+            # wearing a daily label: MSFT showed +15.56% and META -9.3% on a
+            # normal morning. A number that is wrong is worse than one that is
+            # missing, because nothing about it looks broken.
             first = c.execute(
-                "SELECT c FROM bars WHERE symbol=? AND tf='1m' ORDER BY ts_ms LIMIT 1",
-                (r["symbol"],),
+                "SELECT c FROM bars WHERE symbol=? AND tf='1m' AND ts_ms >= ? "
+                "ORDER BY ts_ms LIMIT 1",
+                (r["symbol"], _session_open_ms()),
             ).fetchone()
             d["open"] = first["c"] if first else None
             d["change_pct"] = (

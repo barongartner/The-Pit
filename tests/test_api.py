@@ -173,3 +173,24 @@ def test_session_detail_carries_the_levels_being_enforced(home, conn):
     d = client.get(f"/api/sessions/{sid}").json()
     assert d["exit_plans"][0]["stop_price"] == 99.5
     assert d["pending_entries"][0]["trigger_price"] == 297.0
+
+
+def test_change_pct_is_todays_move_not_every_bar_ever_recorded(tmp_path):
+    """A recorder running for more than a day made "Chg" a multi-day move with a
+    daily label -- MSFT read +15.56% on an ordinary morning. A number that is
+    wrong is worse than one that is missing: nothing about it looks broken.
+    """
+    import time
+    from datetime import datetime, time as _time
+
+    from thepit.api.main import _session_open_ms
+    from thepit.core.calendar import ET
+
+    open_ms = _session_open_ms()
+    now = int(time.time() * 1000)
+
+    assert open_ms <= now, "session open is in the future"
+    assert now - open_ms < 25 * 3_600_000, "session open is more than a day back"
+
+    et = datetime.fromtimestamp(open_ms / 1000, tz=ET)
+    assert (et.hour, et.minute) == (0, 0), "not midnight in the exchange's timezone"

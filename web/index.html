@@ -1,21 +1,22 @@
 <!doctype html>
 <!--
-  Stage 1 price page.
+  The Pit dashboard.
 
-  Deliberately plain: this is the shell that proves the data layer is alive, not
-  the dashboard. The real UI comes from the Claude Design components in Stage 9
-  (issue #12), and React arrives with it. Hand-writing a component system here
-  to throw away in three stages would be waste.
+  Styled from web/tokens/, which is the same CSS pushed to the "The Pit" project
+  in Claude Design. Changing a colour there and copying the token file here is
+  the whole workflow; there is no build step and no second source of truth.
 
-  Three things are not placeholder and should survive the rewrite:
+  Three rules the layout obeys, each of which came from something going wrong:
 
-    * The CHART pauses when the tab is hidden; the table does not. On a 2015
-      machine the canvas redraw heats it far more than the engine does, but
-      gating cheap work on visibility left a background tab stuck on
-      "waiting for data" forever.
-    * Quote age is on screen. A feed that stopped updating looks exactly like
-      a quiet market otherwise.
-    * The PAPER badge is loud. It gets louder in Stage 9, never quieter.
+  * Green and red mean UP and DOWN. Nothing else may use them, which is why the
+    accent is amber. An accent that read as a direction would make the screen
+    lie at a glance.
+  * Every number is monospace. A price column in a proportional face stops
+    aligning the moment a 1 appears.
+  * A thing that is happening must look different from a thing that has stopped.
+    Quote age is a column; in-progress console lines blink. A dead feed used to
+    look exactly like a quiet market, and a crashed session exactly like a
+    thinking one.
 -->
 <html lang="en">
 <head>
@@ -23,135 +24,197 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>The Pit</title>
 <link rel="stylesheet" href="/vendor/uPlot.min.css">
+<link rel="stylesheet" href="/styles.css">
 <style>
-  :root {
-    --bg: #0c0d10; --panel: #131519; --line: #22262e;
-    --text: #e6e8ec; --dim: #7d8595; --accent: #ff9b3d;
-    --up: #2ecc84; --down: #ff5c5c;
-    --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
-  }
   * { box-sizing: border-box; }
+  html, body { height: 100%; }
   body {
-    margin: 0; background: var(--bg); color: var(--text);
-    font: 14px/1.45 -apple-system, "Segoe UI", system-ui, sans-serif;
+    margin: 0; background: var(--bg-app); color: var(--text);
+    font: var(--fs-md)/1.5 var(--font-sans);
+    display: flex; flex-direction: column;
   }
-  header {
-    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
-    padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--panel);
-    position: sticky; top: 0; z-index: 10;
-  }
-  h1 { font-size: 15px; margin: 0; letter-spacing: .14em; text-transform: uppercase; }
-  .badge {
-    font: 600 11px/1 var(--mono); letter-spacing: .12em;
-    padding: 5px 9px; border-radius: 3px; text-transform: uppercase;
-  }
-  .badge.paper { background: #123a2a; color: var(--up); border: 1px solid #1d5c42; }
-  .badge.live  { background: var(--down); color: #fff; }
-  .stat { color: var(--dim); font: 12px var(--mono); }
-  .stat b { color: var(--text); font-weight: 600; }
-  .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 5px; }
-  .ok { background: var(--up); } .bad { background: var(--down); } .idle { background: var(--dim); }
-
-  main { display: grid; grid-template-columns: minmax(320px, 400px) 1fr; gap: 1px; background: var(--line); }
-  @media (max-width: 860px) { main { grid-template-columns: 1fr; } }
-  section { background: var(--bg); padding: 14px 16px; min-width: 0; }
   h2 {
-    font: 600 11px/1 var(--mono); letter-spacing: .12em; text-transform: uppercase;
-    color: var(--dim); margin: 0 0 10px;
+    font: var(--label); letter-spacing: var(--label-tracking);
+    text-transform: uppercase; color: var(--text-sub);
+    margin: 0 0 var(--s-4); display: flex; align-items: baseline; gap: var(--s-3);
+  }
+  h2 .aside { color: var(--text-dim); letter-spacing: 0; text-transform: none; }
+
+  /* ---- live banner: the only full-width red in the system ---------------- */
+  #live-band {
+    display: none; background: var(--live-bg); color: var(--live-text);
+    padding: var(--s-3) var(--s-5);
+    font: var(--fw-semibold) var(--fs-sm)/1 var(--font-mono);
+    letter-spacing: .14em; text-transform: uppercase;
+  }
+  body.live #live-band { display: block; }
+
+  header {
+    display: flex; align-items: center; gap: var(--s-5); flex-wrap: wrap;
+    padding: var(--s-3) var(--s-5); background: var(--bg-panel);
+    border-bottom: var(--hairline); flex: 0 0 auto;
+  }
+  h1 { font-size: var(--fs-lg); margin: 0; letter-spacing: .14em; text-transform: uppercase; }
+  .badge {
+    font: var(--fw-semibold) var(--fs-xs)/1 var(--font-mono); letter-spacing: .12em;
+    padding: 5px 9px; border-radius: var(--radius-sm); text-transform: uppercase;
+  }
+  .badge.paper { background: var(--paper-bg); color: var(--paper-text); border: 1px solid var(--paper-line); }
+  .badge.live  { background: var(--live-bg); color: var(--live-text); }
+  .stat { color: var(--text-sub); font: var(--fs-sm) var(--font-mono); }
+  .stat b { color: var(--text); font-weight: var(--fw-semibold); }
+  .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 5px; }
+  .ok { background: var(--up); } .bad { background: var(--down); } .idle { background: var(--text-dim); }
+
+  /* ---- three columns; the middle one is the work ------------------------- */
+  main {
+    flex: 1 1 auto; min-height: 0;
+    display: grid; grid-template-columns: 260px minmax(0, 1fr) 340px;
+    gap: 1px; background: var(--border);
+  }
+  @media (max-width: 1180px) { main { grid-template-columns: 240px minmax(0, 1fr); } }
+  @media (max-width: 820px)  { main { grid-template-columns: 1fr; } }
+  section {
+    background: var(--bg-app); padding: var(--s-5); min-width: 0;
+    overflow-y: auto;
   }
 
-  table { width: 100%; border-collapse: collapse; font: 13px var(--mono); }
-  th { text-align: right; color: var(--dim); font-weight: 500; padding: 4px 6px; font-size: 11px; }
+  table { width: 100%; border-collapse: collapse; font: var(--fs-md) var(--font-mono); }
+  th {
+    text-align: right; color: var(--text-sub); font-weight: var(--fw-medium);
+    padding: 0 var(--s-2) var(--s-2); font-size: var(--fs-xs);
+  }
   th:first-child, td:first-child { text-align: left; }
-  td { padding: 5px 6px; text-align: right; border-top: 1px solid var(--line); }
-  tr.sel td { background: #1a1d23; }
-  tr:hover td { background: #171a20; cursor: pointer; }
+  td { padding: var(--s-2); text-align: right; border-top: var(--hairline); }
+  tbody tr { cursor: pointer; }
+  tbody tr:hover td { background: var(--bg-raised); }
+  tr.sel td { background: var(--bg-raised); box-shadow: inset 2px 0 0 var(--accent); }
   .up { color: var(--up); } .down { color: var(--down); }
-  .stale { color: var(--down); font-size: 11px; }
+  .stale { color: var(--down); }
+  .held { color: var(--accent); }
 
-  #chart { min-height: 300px; }
-  .news { list-style: none; padding: 0; margin: 0; max-height: 260px; overflow-y: auto; }
-  .news li { padding: 7px 0; border-top: 1px solid var(--line); font-size: 13px; }
-  .news .m { color: var(--dim); font: 11px var(--mono); }
-  .news a { color: var(--text); text-decoration: none; }
-  .news a:hover { color: var(--accent); }
-  .empty { color: var(--dim); font-size: 13px; padding: 10px 0; }
-  .kv { display: flex; gap: 18px; flex-wrap: wrap; font: 12px var(--mono); margin-bottom: 8px; }
-  .kv b { color: var(--text); font-weight: 600; }
-  .log { list-style: none; padding: 0; margin: 8px 0 0; max-height: 200px; overflow-y: auto; }
-  .log li { padding: 5px 0; border-top: 1px solid var(--line); font: 12px var(--mono); }
-  .rej { color: var(--down); }
-  details { margin-top: 8px; }
-  summary { cursor: pointer; color: var(--dim); font: 11px var(--mono);
-            text-transform: uppercase; letter-spacing: .08em; }
-  .console {
-    background: #08090b; border: 1px solid var(--line); border-radius: 4px;
-    padding: 10px 12px; font: 12px/1.65 var(--mono); max-height: 260px;
-    overflow-y: auto; margin-bottom: 10px;
+  /* ---- session ----------------------------------------------------------- */
+  .pnl { font: var(--fw-semibold) var(--fs-2xl)/1 var(--font-mono); }
+  .kv { display: flex; gap: var(--s-5); flex-wrap: wrap; font: var(--fs-sm) var(--font-mono);
+        color: var(--text-sub); margin-top: var(--s-3); }
+  .kv b { color: var(--text); font-weight: var(--fw-semibold); }
+  .arm {
+    font: var(--fs-xs) var(--font-mono); letter-spacing: .1em; text-transform: uppercase;
+    padding: 3px 7px; border-radius: var(--radius-sm);
+    background: var(--bg-raised); color: var(--text-sub);
   }
-  .console div { display: flex; gap: 10px; }
-  .console .t { color: #4b5262; flex: 0 0 auto; }
-  .console .m { color: #b9c0cc; }
-  .console .k-phase .m { color: var(--accent); }
-  .console .k-fill  .m { color: var(--up); }
-  .console .k-error .m { color: var(--down); }
-  .console .k-order .m { color: var(--down); }
-  .console .k-wait  .m { color: var(--dim); }
-  /* Levels are Python acting on its own between ticks -- distinct from both a
-     model decision and a fill, because "why did that close" is the question. */
-  .console .k-levels .m { color: #d7b45a; }
+  .arm.llm { background: var(--accent-dim); color: var(--accent); }
+
+  .console {
+    background: var(--bg-sunken); border: var(--hairline); border-radius: var(--radius-md);
+    padding: var(--s-3) var(--s-4); font: var(--fs-sm)/1.7 var(--font-mono);
+    max-height: 300px; overflow-y: auto;
+  }
+  .console div { display: flex; gap: var(--s-4); }
+  .console .t { color: var(--text-dim); flex: 0 0 auto; }
+  .console .m { color: var(--text-sub); }
+  .console .k-phase  .m { color: var(--accent); }
+  .console .k-fill   .m { color: var(--up); }
+  .console .k-levels .m { color: var(--text); }
+  .console .k-error  .m,
+  .console .k-order  .m { color: var(--down); }
   .console .live .m::after {
-    content: " ▊"; animation: blink 1.1s steps(2) infinite; color: var(--accent);
+    content: " ▊"; color: var(--accent); animation: blink 1.1s steps(2) infinite;
   }
   @keyframes blink { 50% { opacity: 0; } }
-  details pre { white-space: pre-wrap; font: 12px/1.5 var(--mono); color: #cfd4dd;
-                background: var(--panel); padding: 10px; border-radius: 4px;
-                max-height: 240px; overflow-y: auto; }
-  footer { padding: 10px 16px; border-top: 1px solid var(--line); color: var(--dim); font: 11px var(--mono); }
 
-  button {
-    font: 600 11px/1 var(--mono); letter-spacing: .1em; text-transform: uppercase;
-    background: var(--accent); color: #11130f; border: 0; border-radius: 3px;
-    padding: 7px 12px; cursor: pointer;
+  .level {
+    border: var(--hairline); border-radius: var(--radius-md);
+    padding: var(--s-3) var(--s-4); margin-bottom: var(--s-2);
+    font: var(--fs-sm) var(--font-mono);
   }
-  button:hover { filter: brightness(1.12); }
-  button.ghost { background: transparent; color: var(--dim); border: 1px solid var(--line); }
-  button.ghost:hover { color: var(--text); }
-  button:disabled { opacity: .4; cursor: not-allowed; filter: none; }
+  .level .top { display: flex; gap: var(--s-3); align-items: baseline; }
+  .level .top b { font-weight: var(--fw-semibold); }
+  .level .lv { color: var(--text-sub); margin-top: var(--s-1); }
+
+  ul.log { list-style: none; padding: 0; margin: 0; }
+  ul.log li { padding: var(--s-2) 0; border-top: var(--hairline); font: var(--fs-sm) var(--font-mono); }
+  ul.log .l1 { display: flex; gap: var(--s-3); align-items: baseline; }
+  ul.log .st { text-transform: uppercase; letter-spacing: .08em; font-size: var(--fs-xs); flex: 0 0 66px; }
+  ul.log .why { color: var(--text-dim); padding-left: 74px; margin-top: 2px; }
+  .st.filled { color: var(--up); } .st.rejected { color: var(--down); }
+  .st.armed { color: var(--accent); } .st.proposed { color: var(--text-sub); }
+
+  .news { list-style: none; padding: 0; margin: 0; }
+  .news li { padding: var(--s-3) 0; border-top: var(--hairline); font-size: var(--fs-sm); }
+  .news .m { color: var(--text-dim); font: var(--fs-xs) var(--font-mono); }
+  .news a { color: var(--text); text-decoration: none; }
+  .news a:hover { color: var(--accent); }
+
+  .empty { color: var(--text-dim); font-size: var(--fs-sm); padding: var(--s-3) 0; }
+  footer {
+    padding: var(--s-3) var(--s-5); border-top: var(--hairline);
+    color: var(--text-dim); font: var(--fs-xs) var(--font-mono); flex: 0 0 auto;
+  }
+
+  /* ---- controls: three tiers, filled red for the brake only -------------- */
+  button {
+    font: var(--fw-semibold) var(--fs-xs)/1 var(--font-mono); letter-spacing: .1em;
+    text-transform: uppercase; border: 0; border-radius: var(--radius-sm);
+    padding: 8px 13px; cursor: pointer;
+  }
+  .primary { background: var(--accent); color: var(--accent-text); }
+  .primary:hover { filter: brightness(1.1); }
+  .ghost { background: transparent; color: var(--text-sub); border: var(--hairline); }
+  .ghost:hover { color: var(--text); border-color: var(--border-strong); }
+  .kill { background: var(--down); color: #fff; }
+  button:disabled { opacity: .35; cursor: not-allowed; filter: none; }
 
   dialog {
-    background: var(--panel); color: var(--text); border: 1px solid var(--line);
-    border-radius: 6px; padding: 0; width: min(940px, 94vw); max-height: 88vh;
+    background: var(--bg-panel); color: var(--text); border: var(--hairline);
+    border-radius: var(--radius-lg); padding: 0; width: min(940px, 94vw); max-height: 88vh;
   }
-  dialog::backdrop { background: rgba(0,0,0,.66); }
+  dialog::backdrop { background: rgba(0,0,0,.7); }
   .dlg-head, .dlg-foot {
-    padding: 14px 18px; border-bottom: 1px solid var(--line);
-    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    padding: var(--s-4) var(--s-5); display: flex; align-items: center;
+    gap: var(--s-4); flex-wrap: wrap;
   }
-  .dlg-foot { border-bottom: 0; border-top: 1px solid var(--line); }
-  .dlg-body { padding: 16px 18px; overflow-y: auto; max-height: 62vh; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
-  label { display: block; font: 11px var(--mono); color: var(--dim); margin-bottom: 4px;
-          text-transform: uppercase; letter-spacing: .08em; }
+  .dlg-head { border-bottom: var(--hairline); }
+  .dlg-foot { border-top: var(--hairline); }
+  .dlg-body { padding: var(--s-5); overflow-y: auto; max-height: 62vh; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: var(--s-4); }
+  label {
+    display: block; font: var(--label); letter-spacing: var(--label-tracking);
+    text-transform: uppercase; color: var(--text-sub); margin-bottom: var(--s-1);
+  }
   input, select, textarea {
-    width: 100%; background: var(--bg); color: var(--text); font: 13px var(--mono);
-    border: 1px solid var(--line); border-radius: 3px; padding: 7px 8px;
+    width: 100%; background: var(--bg-app); color: var(--text);
+    font: var(--fs-md) var(--font-mono); border: var(--hairline);
+    border-radius: var(--radius-sm); padding: 7px 8px;
   }
-  textarea { font: 13px -apple-system, system-ui, sans-serif; resize: vertical; }
+  textarea { font: var(--fs-md) var(--font-sans); resize: vertical; }
   .banner {
-    padding: 10px 12px; border-radius: 4px; font-size: 13px; margin-bottom: 14px;
-    background: #2a1d12; border: 1px solid #5c3d1d; color: #ffcb8a;
+    padding: var(--s-3) var(--s-4); border-radius: var(--radius-sm);
+    font-size: var(--fs-sm); margin-bottom: var(--s-5);
+    background: var(--accent-dim); border: 1px solid #5c3d1d; color: #ffcb8a;
   }
-  .banner b { color: #ffa94d; }
-  .banner ul { margin: 6px 0 0; padding-left: 18px; }
+  .banner b { color: var(--accent); }
+  .banner ul { margin: var(--s-2) 0 0; padding-left: 18px; }
   pre.prompt {
-    background: var(--bg); border: 1px solid var(--line); border-radius: 4px;
-    padding: 12px; font: 12px/1.5 var(--mono); white-space: pre-wrap;
-    max-height: 46vh; overflow-y: auto; color: #cfd4dd;
+    background: var(--bg-sunken); border: var(--hairline); border-radius: var(--radius-sm);
+    padding: var(--s-4); font: var(--fs-sm)/1.6 var(--font-mono); white-space: pre-wrap;
+    max-height: 44vh; overflow-y: auto; color: #cfd4dd;
+  }
+  details { margin-top: var(--s-3); }
+  summary {
+    cursor: pointer; color: var(--text-sub); font: var(--label);
+    letter-spacing: var(--label-tracking); text-transform: uppercase;
+  }
+  details pre {
+    white-space: pre-wrap; font: var(--fs-sm)/1.6 var(--font-mono); color: #cfd4dd;
+    background: var(--bg-panel); padding: var(--s-4); border-radius: var(--radius-sm);
+    max-height: 260px; overflow-y: auto;
   }
 </style>
 </head>
 <body>
+
+<div id="live-band">◆ live — real money — every order below is real</div>
 
 <header>
   <h1>The&nbsp;Pit</h1>
@@ -161,64 +224,69 @@
   <span class="stat">close in <b id="ttc">-</b></span>
   <span class="stat"><span class="dot idle" id="ws-dot"></span><span id="ws">connecting</span></span>
   <span class="stat" id="counts"></span>
-  <span style="margin-left:auto"><button id="mft-open">MFT Session</button></span>
+  <span style="margin-left:auto;display:flex;gap:8px">
+    <button class="primary" id="mft-open">Run session</button>
+    <button class="kill" id="killbtn" title="Stops everything. Release is a deliberate act.">Kill</button>
+  </span>
 </header>
 
 <main>
   <section>
     <h2>Prices</h2>
     <table>
-      <thead><tr><th>Symbol</th><th>Last</th><th>Chg</th><th>Age</th></tr></thead>
-      <tbody id="quotes"><tr><td colspan="4" class="empty">waiting for data</td></tr></tbody>
+      <thead><tr><th>Symbol</th><th>Last</th><th>Chg</th><th>Held</th><th>Age</th></tr></thead>
+      <tbody id="quotes"><tr><td colspan="5" class="empty">waiting for data</td></tr></tbody>
     </table>
 
-    <h2 style="margin-top:22px">Filings</h2>
-    <ul class="news" id="news"><li class="empty">no filings yet</li></ul>
+    <h2 style="margin-top:var(--s-6)">Filings</h2>
+    <ul class="news" id="news"><li class="empty">nothing yet</li></ul>
+  </section>
+
+  <section>
+    <h2><span id="chart-sym">-</span><span class="aside">1-minute bars, as recorded</span></h2>
+    <div id="chart"></div>
+
+    <h2 style="margin-top:var(--s-6)">Orders <span class="aside" id="order-note"></span></h2>
+    <ul class="log" id="orders"><li class="empty">no orders yet</li></ul>
+
+    <h2 style="margin-top:var(--s-6)">Feed health <span class="aside">24h</span></h2>
+    <div id="health" class="empty">loading</div>
   </section>
 
   <section>
     <h2>Session</h2>
-    <div id="sess" class="empty">no session yet &mdash; press MFT Session</div>
-
-    <h2 style="margin-top:22px"><span id="chart-sym">-</span> &middot; 1m</h2>
-    <div id="chart"></div>
-    <h2 style="margin-top:22px">Feed health &middot; 24h</h2>
-    <div id="health" class="empty">loading</div>
+    <div id="sess" class="empty">none yet — press Run session</div>
   </section>
 </main>
 
+<footer id="foot">paper · simulated fills against recorded prices</footer>
+
 <dialog id="mft">
   <form method="dialog" class="dlg-head">
-    <strong style="font:600 13px/1 var(--mono);letter-spacing:.12em">MFT SESSION</strong>
-    <span class="stat">medium frequency &middot; bounded window &middot; forced flat at the end</span>
+    <strong style="font:var(--fw-semibold) var(--fs-md) var(--font-mono);letter-spacing:.12em">MFT SESSION</strong>
+    <span class="stat">bounded window · forced flat at the end</span>
     <span style="margin-left:auto"><button class="ghost" value="cancel">Close</button></span>
   </form>
 
   <div class="dlg-body">
-    <div class="banner" id="mft-banner">checking what this session can do&hellip;</div>
+    <div class="banner" id="mft-banner">checking&hellip;</div>
 
     <div class="grid">
       <div><label>Duration (min)</label>
-        <select id="f-duration">
-          <option>15</option><option selected>30</option><option>45</option><option>60</option>
-        </select></div>
+        <select id="f-duration"><option>15</option><option selected>30</option><option>45</option><option>60</option></select></div>
       <div><label>Capital ($)</label><input id="f-capital" type="number" value="20" step="5"></div>
       <div><label>Policy tick (min)</label>
         <select id="f-tick"><option>1</option><option>2</option><option selected>5</option><option>10</option></select></div>
-      <div><label>Level check (sec)</label>
-        <select id="f-fast" title="How often Python enforces stops, targets and time stops between policy ticks. No model call, so seconds are real here.">
-          <option>2</option><option selected>5</option><option>10</option><option>30</option>
-        </select></div>
       <div><label>Risk profile</label>
         <select id="f-risk">
-          <option value="preserve">preserve capital (20% / stop -2%)</option>
-          <option value="balanced">balanced (50% / stop -15%)</option>
-          <option value="risk_it" selected>risk it all (100% / stop -60%)</option>
+          <option value="preserve">preserve capital</option>
+          <option value="balanced">balanced</option>
+          <option value="risk_it" selected>risk it all</option>
           <option value="custom">custom</option>
         </select></div>
       <div><label>Max position (%)</label><input id="f-maxpos" type="number" value="100"></div>
       <div><label>Max concurrent</label><input id="f-maxcon" type="number" value="1"></div>
-      <div><label>Session loss limit (%)</label><input id="f-loss" type="number" value="60" step="5"></div>
+      <div><label>Halt at loss (%)</label><input id="f-loss" type="number" value="60" step="5"></div>
       <div><label>Flatten before end (min)</label><input id="f-flat" type="number" value="2"></div>
       <div><label>Model</label>
         <select id="f-model"><option>haiku</option><option selected>sonnet</option><option>opus</option></select></div>
@@ -236,78 +304,66 @@
           <option value="anonymized">anonymized</option>
           <option value="mislabeled">mislabeled</option>
         </select></div>
-      <div><label>Baseline alongside</label>
-        <select id="f-baseline"><option value="true" selected>yes</option><option value="false">no</option></select></div>
+      <div><label>Baseline twin</label>
+        <select id="f-baseline"><option value="true" selected>yes — paired</option><option value="false">no</option></select></div>
     </div>
 
-    <div style="margin-top:14px">
+    <div style="margin-top:var(--s-5)">
       <label>Universe (blank = full watchlist)</label>
       <input id="f-symbols" placeholder="AAPL, NVDA, TSLA">
     </div>
-    <div style="margin-top:14px">
+    <div style="margin-top:var(--s-5)">
       <label>Operator note (context, not an override)</label>
       <textarea id="f-notes" rows="2" placeholder="e.g. avoid anything reporting earnings today"></textarea>
     </div>
 
-    <h2 style="margin-top:20px">Prompt the agent would receive</h2>
+    <h2 style="margin-top:var(--s-6)">Prompt the agent receives</h2>
     <pre class="prompt" id="mft-prompt">Press Preview.</pre>
   </div>
 
   <div class="dlg-foot">
-    <button id="mft-preview">Preview</button>
-    <button id="mft-start" disabled title="Needs the fill engine, risk engine and agent runtime">Start session</button>
-    <span class="stat" id="mft-note"></span>
+    <button class="primary" id="mft-start">Start</button>
+    <button class="ghost" id="mft-preview">Preview</button>
+    <span class="stat" id="mft-note" style="margin-left:auto"></span>
   </div>
 </dialog>
-
-<footer id="foot">paper trading &middot; levels enforced in Python between model ticks</footer>
 
 <script src="/vendor/uPlot.iife.min.js"></script>
 <script>
 (() => {
   "use strict";
   const $ = id => document.getElementById(id);
-  const fmt = n => n == null ? "-" : n.toFixed(2);
+  const esc = t => (t || "").replace(/[<>&]/g, c => ({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));
+  const money = n => (n >= 0 ? "+" : "−") + "$" + Math.abs(n).toFixed(2);
+  const dirClass = n => n > 0 ? "up" : n < 0 ? "down" : "";
 
-  let quotes = new Map();
-  let selected = null;
-  let chart = null;
-  let dirty = false;
+  let quotes = new Map(), held = new Map(), selected = null, chart = null, dirty = false;
+  let activeSession = null, lastActivityId = 0;
 
-  // What pauses when the tab is hidden, and what does not.
-  //
-  // Only the CHART pauses. Redrawing a canvas at animation-frame rate on 2015
-  // integrated graphics is what actually heats this machine; repainting a
-  // twelve-row table costs nothing measurable.
-  //
-  // An earlier version gated every repaint on document.hidden, which meant a
-  // page opened in a background tab -- cmd-clicked, or restored on browser
-  // launch -- sat on "waiting for data" indefinitely even though the socket was
-  // connected and receiving. Cheap work should not be conditional on someone
-  // looking at it.
+  // Only the CHART pauses when hidden. Redrawing a canvas is what actually
+  // costs; a twelve-row table costs nothing, and gating cheap work on
+  // visibility once left a background tab stuck on "waiting for data" forever.
   let visible = !document.hidden;
-
   document.addEventListener("visibilitychange", () => {
     visible = !document.hidden;
     if (visible) { dirty = true; if (selected) loadChart(selected); }
   });
 
   function renderQuotes() {
-    const tb = $("quotes");
     if (!quotes.size) return;
-    const rows = [...quotes.values()].map(q => {
-      const cls = q.change_pct > 0 ? "up" : q.change_pct < 0 ? "down" : "";
-      const sign = q.change_pct > 0 ? "+" : "";
-      // A quote that stopped updating looks exactly like a quiet market unless
-      // the age is on screen.
-      const stale = q.age_s > 60 ? ` class="stale"` : "";
+    const tb = $("quotes");
+    tb.innerHTML = [...quotes.values()].map(q => {
+      const h = held.get(q.symbol);
+      const age = q.age_s < 60 ? Math.round(q.age_s) + "s" : Math.round(q.age_s / 60) + "m";
       return `<tr data-s="${q.symbol}"${q.symbol === selected ? ' class="sel"' : ""}>
-        <td>${q.symbol}</td><td>${fmt(q.last)}</td>
-        <td class="${cls}">${q.change_pct == null ? "-" : sign + q.change_pct + "%"}</td>
-        <td${stale}>${q.age_s < 60 ? Math.round(q.age_s) + "s" : Math.round(q.age_s / 60) + "m"}</td>
+        <td>${q.symbol}</td>
+        <td>${q.last == null ? "-" : q.last.toFixed(2)}</td>
+        <td class="${dirClass(q.change_pct)}">${q.change_pct == null ? "-" :
+          (q.change_pct > 0 ? "+" : "") + q.change_pct + "%"}</td>
+        <td class="${h ? "held" : ""}">${h ? (+h).toPrecision(3) : "—"}</td>
+        <td class="${q.age_s > 60 ? "stale" : ""}">${age}</td>
       </tr>`;
-    });
-    tb.innerHTML = rows.join("");
+    }).join("");
     for (const tr of tb.querySelectorAll("tr[data-s]")) {
       tr.onclick = () => { selected = tr.dataset.s; loadChart(selected); renderQuotes(); };
     }
@@ -316,35 +372,29 @@
   async function loadChart(symbol) {
     if (!symbol) return;
     $("chart-sym").textContent = symbol;
-    const bars = await fetch(`/api/bars/${symbol}?limit=200`).then(r => r.json());
-    if (!bars.length) { $("chart").innerHTML = '<div class="empty">no bars yet</div>'; return; }
-
-    const data = [bars.map(b => b.ts_ms / 1000), bars.map(b => b.c)];
+    const bars = await fetch(`/api/bars/${symbol}?limit=240`).then(r => r.json()).catch(() => []);
+    if (!bars.length) { $("chart").innerHTML = '<div class="empty">no bars recorded yet</div>'; return; }
     const width = $("chart").clientWidth || 640;
     if (chart) { chart.destroy(); chart = null; }
+    const css = getComputedStyle(document.documentElement);
+    const accent = css.getPropertyValue("--accent").trim();
+    const line = css.getPropertyValue("--border").trim();
+    const dim = css.getPropertyValue("--text-dim").trim();
     chart = new uPlot({
-      width, height: 300,
+      width, height: 260,
       cursor: { points: { size: 5 } },
       scales: { x: { time: true } },
       axes: [
-        { stroke: "#7d8595", grid: { stroke: "#22262e" }, ticks: { stroke: "#22262e" } },
-        { stroke: "#7d8595", grid: { stroke: "#22262e" }, ticks: { stroke: "#22262e" } },
+        { stroke: dim, grid: { stroke: line }, ticks: { stroke: line } },
+        { stroke: dim, grid: { stroke: line }, ticks: { stroke: line } },
       ],
-      series: [
-        {},
-        { label: symbol, stroke: "#ff9b3d", width: 1.5,
-          fill: "rgba(255,155,61,0.07)" },
-      ],
-    }, data, $("chart"));
+      series: [{}, { label: symbol, stroke: accent, width: 1.5, fill: "rgba(255,155,61,.07)" }],
+    }, [bars.map(b => b.ts_ms / 1000), bars.map(b => b.c)], $("chart"));
   }
 
   function connect() {
     const ws = new WebSocket(`ws://${location.host}/ws`);
-
-    ws.onopen = () => {
-      $("ws").textContent = "live";
-      $("ws-dot").className = "dot ok";
-    };
+    ws.onopen = () => { $("ws").textContent = "live"; $("ws-dot").className = "dot ok"; };
     ws.onmessage = ev => {
       const m = JSON.parse(ev.data);
       if (m.type === "snapshot") {
@@ -357,10 +407,7 @@
       }
     };
     const down = () => {
-      $("ws").textContent = "reconnecting";
-      $("ws-dot").className = "dot bad";
-      // Fixed backoff: this is a localhost socket, so the only realistic reason
-      // it dropped is the API restarting, and that takes about a second.
+      $("ws").textContent = "reconnecting"; $("ws-dot").className = "dot bad";
       setTimeout(connect, 2000);
     };
     ws.onclose = down;
@@ -374,28 +421,32 @@
       $("ttc").textContent = s.minutes_to_close == null ? "-" : s.minutes_to_close + "m";
       $("mode").textContent = s.mode;
       $("mode").className = "badge " + s.mode;
-      $("engine").textContent = s.engine_alive
-        ? "engine up" : `engine down (${s.engine_heartbeat_age_s ?? "?"}s)`;
+      document.body.classList.toggle("live", s.mode === "live");
+      $("engine").textContent = s.engine_alive ? "engine up"
+        : `engine down (${s.engine_heartbeat_age_s ?? "?"}s)`;
       $("engine-dot").className = "dot " + (s.engine_alive ? "ok" : "bad");
       $("counts").textContent =
         `${s.counts.bars} bars · ${s.counts.ticks} ticks · ${s.counts.news} filings`;
       if (s.kill_engaged) {
-        $("foot").textContent = "KILL SWITCH ENGAGED";
+        $("foot").textContent = "KILL SWITCH ENGAGED — release it before starting anything";
         $("foot").style.color = "var(--down)";
       }
-      if (!s.control_enabled) $("foot").textContent = "read-only view";
-    } catch { /* API restarting; the next tick will pick it up */ }
+      if (!s.control_enabled) {
+        $("foot").textContent = "read-only view";
+        for (const b of [$("mft-open"), $("killbtn")]) b.disabled = true;
+      }
+    } catch { /* API restarting; next tick picks it up */ }
   }
 
   async function loadNews() {
     const items = await fetch("/api/news?limit=25").then(r => r.json()).catch(() => []);
     $("news").innerHTML = items.length ? items.map(n => {
-      const t = new Date(n.published_ms).toLocaleString([], {
-        month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
-      const link = n.url ? `<a href="${n.url}" target="_blank" rel="noopener">${n.headline}</a>`
-                         : n.headline;
+      const t = new Date(n.published_ms).toLocaleString([],
+        { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+      const link = n.url ? `<a href="${n.url}" target="_blank" rel="noopener">${esc(n.headline)}</a>`
+                         : esc(n.headline);
       return `<li><div class="m">${t} · ${n.symbols.join(", ") || "macro"}</div>${link}</li>`;
-    }).join("") : '<li class="empty">no filings for the watchlist yet</li>';
+    }).join("") : '<li class="empty">nothing for the watchlist yet</li>';
   }
 
   async function loadHealth() {
@@ -405,138 +456,16 @@
       `<div class="stat"><b>${name}</b> ${(s.success_rate * 100).toFixed(1)}% of ${s.total}
        · p50 ${s.p50_ms ?? "-"}ms · p99 ${s.p99_ms ?? "-"}ms</div>`).join("");
     const gaps = h.gaps.length
-      ? `<div class="stat" style="color:var(--down)">${h.gaps.length} gap(s) over 10min:
-         ${h.gaps.map(g => g.minutes + "m").join(", ")}</div>`
-      : `<div class="stat" style="color:var(--up)">no gaps over 10 minutes</div>`;
+      ? `<div class="stat down">${h.gaps.length} gap(s) over 10min: ${h.gaps.map(g => g.minutes + "m").join(", ")}</div>`
+      : `<div class="stat up">no gaps over 10 minutes</div>`;
     const hrs = (Date.now() - h.measured_from_ms) / 3600000;
     const note = h.partial_window
-      ? `<div class="stat">only ${hrs.toFixed(1)}h of history; measured from first fetch</div>`
-      : "";
+      ? `<div class="stat">only ${hrs.toFixed(1)}h of history; measured from first fetch</div>` : "";
     $("health").innerHTML = note + src + gaps;
     $("health").className = "";
   }
 
-  // Cheap and always: table repaint, status, news, health.
-  setInterval(() => { if (dirty) { renderQuotes(); dirty = false; } }, 1000);
-  setInterval(poll, 2000);
-  setInterval(() => { loadNews(); loadHealth(); }, 30000);
-  // Expensive and only when someone is looking: the canvas redraw.
-  setInterval(() => { if (visible && selected) loadChart(selected); }, 60000);
-
-  // ---- MFT session dialogue -------------------------------------------------
-  //
-  // The Start button is disabled and will stay disabled until the fill engine,
-  // risk engine and agent runtime exist. Preview is fully functional: it renders
-  // the real prompt from real recorded bars, which is the part worth reviewing
-  // long before anything can act on it.
-  const dlg = $("mft");
-  $("mft-open").onclick = () => { dlg.showModal(); previewSession(); };
-
-  function sessionConfig() {
-    const syms = $("f-symbols").value.split(/[\s,]+/).filter(Boolean).map(s => s.toUpperCase());
-    return {
-      duration_minutes: +$("f-duration").value,
-      capital: +$("f-capital").value,
-      policy_tick_minutes: +$("f-tick").value,
-      fast_loop_seconds: +$("f-fast").value,
-      risk_profile: $("f-risk").value,
-      max_position_pct: +$("f-maxpos").value,
-      max_concurrent_positions: +$("f-maxcon").value,
-      session_loss_limit_pct: +$("f-loss").value,
-      flatten_before_end_minutes: +$("f-flat").value,
-      model: $("f-model").value,
-      effort: $("f-effort").value,
-      research: $("f-research").value,
-      blinding: $("f-blind").value,
-      run_baseline: $("f-baseline").value === "true",
-      symbols: syms,
-      notes: $("f-notes").value,
-    };
-  }
-
-  async function previewSession() {
-    $("mft-prompt").textContent = "building…";
-    const r = await fetch("/api/session/preview", {
-      method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify(sessionConfig()),
-    });
-    const d = await r.json();
-
-    if (d.errors) {
-      $("mft-banner").innerHTML =
-        "<b>This configuration cannot run.</b><ul>" +
-        d.errors.map(e => `<li>${e}</li>`).join("") + "</ul>";
-      $("mft-prompt").textContent = "Fix the configuration above, then preview again.";
-      return;
-    }
-
-    const warns = d.readiness.warnings.length
-      ? "<ul>" + d.readiness.warnings.map(w => `<li>${w}</li>`).join("") + "</ul>" : "";
-    $("mft-banner").innerHTML = d.readiness.can_execute
-      ? "<b>Paper trading.</b> No real money. Orders are simulated against recorded "
-        + "prices with an assumed spread." + warns
-      : "<b>Cannot start.</b> " + d.readiness.missing.join("; ") + "." + warns;
-    $("mft-start").disabled = !d.readiness.can_execute;
-    $("mft-prompt").textContent = d.prompt;
-    // Usage footprint up front. These calls come out of the same 5-hour
-    // subscription window the operator uses for everything else.
-    const heavy = d.config.model_calls > 20;
-    $("mft-note").innerHTML =
-      `${d.config.trading_minutes}m to open · ${d.config.symbols.length} symbols · ` +
-      `levels checked every ${d.config.fast_loop_seconds}s · ` +
-      `<span style="color:${heavy ? 'var(--down)' : 'inherit'}">` +
-      `${d.config.model_calls} model calls (~${d.config.latency_s}s waiting)</span>` +
-      (heavy ? ` — heavy on your 5-hour window` : "");
-  }
-
-  // Selecting a profile fills the three fields, so the numbers stay visible and
-  // editable rather than hidden behind a label.
-  const PROFILES = {preserve: [20, 2, 3], balanced: [50, 15, 2], risk_it: [100, 60, 1]};
-  $("f-risk").onchange = () => {
-    const p = PROFILES[$("f-risk").value];
-    if (p) { $("f-maxpos").value = p[0]; $("f-loss").value = p[1]; $("f-maxcon").value = p[2]; }
-    previewSession();
-  };
-  for (const id of ["f-maxpos", "f-loss", "f-maxcon"]) {
-    $(id).onchange = () => { $("f-risk").value = "custom"; previewSession(); };
-  }
-
-  $("mft-preview").onclick = e => { e.preventDefault(); previewSession(); };
-
-  $("mft-start").onclick = async e => {
-    e.preventDefault();
-    $("mft-start").disabled = true;
-    $("mft-start").textContent = "starting…";
-    const r = await fetch("/api/control/session/start", {
-      method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify(sessionConfig()),
-    });
-    const d = await r.json();
-    $("mft-start").textContent = "Start session";
-    if (d.errors) {
-      $("mft-banner").innerHTML = "<b>Could not start.</b><ul>" +
-        d.errors.map(x => `<li>${x}</li>`).join("") + "</ul>";
-      $("mft-start").disabled = false;
-      return;
-    }
-    activeSession = d.session_id;
-    lastActivityId = 0;
-    dlg.close();
-    loadSession();
-  };
-  for (const id of ["f-duration","f-tick","f-research","f-blind","f-capital"]) {
-    $(id).onchange = previewSession;
-  }
-
-  // ---- session panel --------------------------------------------------------
-  //
-  // The console is the point. During a 40-second model call or a 3-minute wait
-  // between ticks, nothing else on this page changes -- which made a working
-  // session and a dead one look identical. Two sessions were lost that way
-  // before this existed.
-  let activeSession = null;
-  let lastActivityId = 0;
-  let pendingSince = null;
+  // ---- session ------------------------------------------------------------
 
   async function loadActivity() {
     if (activeSession == null) return;
@@ -544,23 +473,18 @@
                        .then(r => r.json()).catch(() => []);
     const box = $("console");
     if (!box) return;
-
     for (const r of rows) {
       lastActivityId = Math.max(lastActivityId, r.id);
       const el = document.createElement("div");
       el.className = `k-${r.kind}` + (r.pending ? " live" : "");
       el.dataset.id = r.id;
-      el.innerHTML = `<span class="t">${new Date(r.ts_ms).toLocaleTimeString([], 
-        {hour12: false})}</span><span class="m">${esc(r.message)}</span>`;
+      el.innerHTML = `<span class="t">${new Date(r.ts_ms).toLocaleTimeString([], { hour12: false })}</span>`
+                   + `<span class="m">${esc(r.message)}</span>`;
       box.appendChild(el);
-      pendingSince = r.pending ? Date.now() : null;
     }
-    // A finished line stops being "live"; re-fetch clears stale pending flags.
-    if (rows.some(r => !r.pending)) {
-      for (const el of box.querySelectorAll(".live")) {
-        const row = rows.find(r => String(r.id) === el.dataset.id);
-        if (row && !row.pending) el.classList.remove("live");
-      }
+    for (const el of box.querySelectorAll(".live")) {
+      const row = rows.find(r => String(r.id) === el.dataset.id);
+      if (row && !row.pending) el.classList.remove("live");
     }
     box.scrollTop = box.scrollHeight;
   }
@@ -571,92 +495,183 @@
       if (!list.length) return;
       activeSession = list[0].id;
     }
-    const d = await fetch(`/api/sessions/${activeSession}`).then(r => r.json())
-                    .catch(() => null);
+    const d = await fetch(`/api/sessions/${activeSession}`).then(r => r.json()).catch(() => null);
     if (!d || d.error) return;
 
     const s = d.session;
-    const pnlCls = d.pnl > 0 ? "up" : d.pnl < 0 ? "down" : "";
-    const live = s.status === "running" || s.status === "flattening";
+    const running = s.status === "running" || s.status === "flattening";
+    held = new Map(d.positions.filter(p => Math.abs(p.qty) > 1e-9).map(p => [p.symbol, p.qty]));
 
-    const open = d.positions.filter(p => Math.abs(p.qty) > 1e-9);
-    const rejects = d.orders.filter(o => o.status === "rejected");
     const spend = d.decisions.reduce((a, x) => a + (x.cost_usd || 0), 0);
+    const armed = (d.pending_entries || []).filter(p => p.status === "waiting");
+    const plans = (d.exit_plans || []).filter(p => p.status === "active");
 
-    let html = `<div class="kv">
-      <span>#${s.id} <b>${s.status}</b>${d.alive === false && live ? " (no heartbeat)" : ""}</span>
+    let html = `<div style="display:flex;align-items:center;gap:var(--s-3);margin-bottom:var(--s-4)">
+      <span style="font:var(--fw-semibold) var(--fs-md) var(--font-mono)">#${s.id}</span>
+      <span class="arm ${s.arm === "llm" ? "llm" : ""}">${s.arm || "?"}${
+        s.arm === "llm" && s.model ? " · " + s.model : ""}</span>
+      <span class="stat">${s.status}</span>
+      ${s.twin_of ? `<span class="stat" title="paired control">↔ #${s.twin_of}</span>` : ""}
+      ${running ? '<span class="dot ok" style="margin-left:auto"></span>' : ""}
+    </div>
+    <div class="pnl ${dirClass(d.pnl)}">${money(d.pnl)}</div>
+    <div class="kv">
       <span>equity <b>$${d.equity.toFixed(2)}</b></span>
-      <span class="${pnlCls}">P&L <b>${d.pnl >= 0 ? "+" : ""}$${d.pnl.toFixed(2)}</b>${
-        d.pnl_realised === false ? ' <span class="stat">unrealised</span>' : ""}</span>
       <span>cash <b>$${s.cash.toFixed(2)}</b></span>
+      <span>${d.pnl_realised ? "realised" : "unrealised"}</span>
       <span>tokens <b>$${spend.toFixed(3)}</b></span>
     </div>`;
 
-    if (s.halt_reason) html += `<div class="stat down">halted: ${s.halt_reason}</div>`;
-    html += `<div class="console" id="console"></div>`;
+    if (s.halt_reason) html += `<div class="stat down" style="margin-top:var(--s-3)">halted: ${esc(s.halt_reason)}</div>`;
+    if (d.alive === false && running) html += `<div class="stat down" style="margin-top:var(--s-3)">no heartbeat</div>`;
 
-    // The levels Python is enforcing, next to the position they belong to.
-    // Otherwise "it closed by itself" is only answerable by reading the log.
-    const plans = {};
-    for (const p of (d.exit_plans || [])) if (p.status === "active") plans[p.symbol] = p;
+    html += `<h2 style="margin-top:var(--s-6)">Activity</h2><div class="console" id="console"></div>`;
 
-    html += open.length
-      ? "<ul class='log'>" + open.map(p => {
-          const x = plans[p.symbol];
-          return `<li>${p.symbol} ${p.qty > 0 ? "+" : ""}${p.qty} @ ${p.avg_price.toFixed(2)}` +
-            (x ? `<br><span class="stat">stop ${x.stop_price.toFixed(2)}` +
-                 (x.target_price ? ` · target ${x.target_price.toFixed(2)}` : "") +
-                 (x.trail_bp ? ` · trailing ${x.trail_bp}bp` : "") +
-                 (x.time_stop_ms ? ` · time stop ${new Date(x.time_stop_ms)
-                    .toLocaleTimeString([], {hour12: false})}` : "") +
-                 `</span>`
-               : `<br><span class="stat rej">no exit plan</span>`) + `</li>`;
-        }).join("") + "</ul>"
-      : `<div class="stat">flat</div>`;
-
-    const armed = (d.pending_entries || []).filter(e => e.status === "waiting");
-    if (armed.length) {
-      html += "<ul class='log'>" + armed.map(e =>
-        `<li>armed: ${e.side} ${e.qty} ${e.symbol} when ` +
-        `${e.direction === "at_or_below" ? "≤" : "≥"} ${e.trigger_price.toFixed(2)}` +
-        `<br><span class="stat">expires ${new Date(e.expires_ms)
-           .toLocaleTimeString([], {hour12: false})}</span></li>`).join("") + "</ul>";
-    }
-    const fired = (d.exit_plans || []).filter(p => p.status === "fired");
-    if (fired.length) {
-      html += `<div class="stat">${fired.length} level(s) fired: ` +
-        fired.map(p => `${p.symbol} ${esc(p.fired_reason || "")}`).join("; ") + `</div>`;
+    if (plans.length || armed.length) {
+      html += `<h2 style="margin-top:var(--s-6)">Levels <span class="aside">enforced every few seconds</span></h2>`;
+      for (const p of plans) {
+        html += `<div class="level"><div class="top"><b>${p.symbol}</b>
+          <span class="stat">holding</span></div>
+          <div class="lv">stop ${(+p.stop_price).toFixed(2)}${
+            p.target_price ? ` · target ${(+p.target_price).toFixed(2)}` : ""}${
+            p.trail_bp ? ` · trail ${p.trail_bp}bp` : ""}</div></div>`;
+      }
+      for (const a of armed) {
+        html += `<div class="level" style="border-color:var(--accent-dim)"><div class="top">
+          <b>${a.symbol}</b><span class="arm llm">armed</span></div>
+          <div class="lv">${a.side} ${(+a.qty).toPrecision(3)} when price
+          ${a.direction === "at_or_below" ? "≤" : "≥"} ${(+a.trigger_price).toFixed(2)}</div></div>`;
+      }
     }
 
-    if (d.orders.length) {
-      html += "<ul class='log'>" + d.orders.slice(0, 8).map(o =>
-        `<li class="${o.status === 'rejected' ? 'rej' : ''}">` +
-        `${o.side} ${o.qty} ${o.symbol} — ${o.status}` +
-        (o.reject_reason ? `: ${o.reject_reason}` : "") +
-        (o.reason ? `<br><span class="stat">${o.reason}</span>` : "") +
-        `</li>`).join("") + "</ul>";
-    }
-    if (rejects.length) {
-      html += `<div class="stat">${rejects.length} order(s) rejected by the risk layer</div>`;
-    }
-    if (s.plan) {
-      html += `<details><summary>Plan</summary><pre>${esc(s.plan)}</pre></details>`;
-    }
-    if (s.review) {
-      html += `<details open><summary>Review</summary><pre>${esc(s.review)}</pre></details>`;
-    }
+    if (s.plan)   html += `<details><summary>Plan</summary><pre>${esc(s.plan)}</pre></details>`;
+    if (s.review) html += `<details open><summary>Review</summary><pre>${esc(s.review)}</pre></details>`;
+
     const prev = $("console");
     const carry = prev ? prev.innerHTML : "";
     $("sess").innerHTML = html;
     $("sess").className = "";
     if (carry) $("console").innerHTML = carry;
+
+    renderOrders(d.orders || []);
+    renderQuotes();
     loadActivity();
-    if (live) setTimeout(loadSession, 4000);
+    if (running) setTimeout(loadSession, 4000);
   }
 
-  const esc = t => (t || "").replace(/[<>&]/g, c => ({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));
+  function renderOrders(orders) {
+    const rej = orders.filter(o => o.status === "rejected").length;
+    $("order-note").textContent = orders.length
+      ? `${orders.length} proposed · ${rej} rejected` : "";
+    $("orders").innerHTML = orders.length ? orders.slice(0, 20).map(o => `
+      <li><div class="l1">
+        <span class="st ${o.status}">${o.status}</span>
+        <span>${o.side} ${(+o.qty).toPrecision(3)} ${o.symbol}</span>
+        ${o.conviction ? `<span class="stat" style="margin-left:auto">conv ${o.conviction}</span>` : ""}
+      </div>${o.reject_reason || o.reason
+        ? `<div class="why">${esc(o.reject_reason || o.reason)}</div>` : ""}</li>`).join("")
+      : '<li class="empty">no orders yet</li>';
+  }
 
+  // ---- dialogue -----------------------------------------------------------
+  const dlg = $("mft");
+  $("mft-open").onclick = () => { dlg.showModal(); previewSession(); };
+
+  const PROFILES = { preserve: [20, 2, 3], balanced: [50, 15, 2], risk_it: [100, 60, 1] };
+  $("f-risk").onchange = () => {
+    const p = PROFILES[$("f-risk").value];
+    if (p) { $("f-maxpos").value = p[0]; $("f-loss").value = p[1]; $("f-maxcon").value = p[2]; }
+    previewSession();
+  };
+  for (const id of ["f-maxpos", "f-loss", "f-maxcon"]) {
+    $(id).onchange = () => { $("f-risk").value = "custom"; previewSession(); };
+  }
+  for (const id of ["f-duration", "f-tick", "f-research", "f-blind", "f-capital", "f-baseline"]) {
+    $(id).onchange = previewSession;
+  }
+
+  function sessionConfig() {
+    return {
+      duration_minutes: +$("f-duration").value,
+      capital: +$("f-capital").value,
+      policy_tick_minutes: +$("f-tick").value,
+      risk_profile: $("f-risk").value,
+      max_position_pct: +$("f-maxpos").value,
+      max_concurrent_positions: +$("f-maxcon").value,
+      session_loss_limit_pct: +$("f-loss").value,
+      flatten_before_end_minutes: +$("f-flat").value,
+      model: $("f-model").value,
+      effort: $("f-effort").value,
+      research: $("f-research").value,
+      blinding: $("f-blind").value,
+      run_baseline: $("f-baseline").value === "true",
+      symbols: $("f-symbols").value.split(/[\s,]+/).filter(Boolean).map(s => s.toUpperCase()),
+      notes: $("f-notes").value,
+    };
+  }
+
+  async function previewSession() {
+    $("mft-prompt").textContent = "building…";
+    const d = await fetch("/api/session/preview", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(sessionConfig()),
+    }).then(r => r.json());
+
+    if (d.errors) {
+      $("mft-banner").innerHTML = "<b>This configuration cannot run.</b><ul>"
+        + d.errors.map(e => `<li>${esc(e)}</li>`).join("") + "</ul>";
+      $("mft-prompt").textContent = "Fix the configuration above, then preview again.";
+      $("mft-start").disabled = true;
+      return;
+    }
+    const warns = d.readiness.warnings.length
+      ? "<ul>" + d.readiness.warnings.map(w => `<li>${esc(w)}</li>`).join("") + "</ul>" : "";
+    $("mft-banner").innerHTML = d.readiness.can_execute
+      ? "<b>Paper.</b> Simulated fills against recorded prices, with an assumed spread." + warns
+      : "<b>Cannot start.</b> " + d.readiness.missing.join("; ") + "." + warns;
+    $("mft-start").disabled = !d.readiness.can_execute;
+    $("mft-prompt").textContent = d.prompt;
+
+    const heavy = d.config.model_calls > 20;
+    $("mft-note").innerHTML =
+      `${d.config.trading_minutes}m to open · ${d.config.symbols.length} symbols · `
+      + `<span style="color:${heavy ? "var(--down)" : "inherit"}">${d.config.model_calls} model calls</span>`
+      + (heavy ? " — heavy on your 5-hour window" : "");
+  }
+
+  $("mft-preview").onclick = e => { e.preventDefault(); previewSession(); };
+
+  $("mft-start").onclick = async e => {
+    e.preventDefault();
+    $("mft-start").disabled = true; $("mft-start").textContent = "starting…";
+    const d = await fetch("/api/control/session/start", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(sessionConfig()),
+    }).then(r => r.json());
+    $("mft-start").textContent = "Start";
+    if (d.errors) {
+      $("mft-banner").innerHTML = "<b>Could not start.</b><ul>"
+        + d.errors.map(x => `<li>${esc(x)}</li>`).join("") + "</ul>";
+      $("mft-start").disabled = false;
+      return;
+    }
+    activeSession = d.session_id; lastActivityId = 0;
+    dlg.close(); loadSession();
+  };
+
+  $("killbtn").onclick = async () => {
+    if (!confirm("Engage the kill switch? Everything stops and releasing it is a "
+               + "deliberate, separate action.")) return;
+    await fetch("/api/control/kill", { method: "POST" }).catch(() => {});
+    poll();
+  };
+
+  setInterval(() => { if (dirty) { renderQuotes(); dirty = false; } }, 1000);
   setInterval(loadActivity, 2000);
+  setInterval(poll, 2000);
+  setInterval(() => { loadNews(); loadHealth(); }, 30000);
+  setInterval(() => { if (visible && selected) loadChart(selected); }, 60000);
+
   connect(); poll(); loadNews(); loadHealth(); loadSession();
 })();
 </script>
