@@ -580,7 +580,9 @@ def test_a_session_that_halted_early_is_not_recorded_as_done(runner):
 
 async def test_the_review_is_not_told_it_is_flat_while_holding(runner):
     buy(runner, stop_bp=30)
-    runner.use_stub = True
+    # Reach past the guard: this exercises _review's text, not the arm, and the
+    # session row was already created by the fixture.
+    runner._use_stub = True  # noqa: SLF001
     await runner._review(["AAPL"])  # noqa: SLF001
     review = runner._conn.execute(  # noqa: SLF001
         "SELECT review FROM sessions WHERE id=?",

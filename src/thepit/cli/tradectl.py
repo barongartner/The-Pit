@@ -249,8 +249,10 @@ def cmd_eval(config: cfg.Config, args) -> int:
             print(f"\ndifference {DIM}not measurable — one arm has no scorable "
                   f"sessions{RESET}")
         print(f"pairs      {rep.pairs}"
+              + (f" ({rep.twinned_pairs} twinned, "
+                 f"{rep.pairs - rep.twinned_pairs} by clock)" if rep.pairs else "")
               + (f", sign test p {_num(rep.paired_p, 3)}" if rep.pairs else
-                 f" {DIM}(unpaired: nothing links a session to its control){RESET}"))
+                 f" {DIM}(unpaired — set run_baseline to spawn a twin){RESET}"))
         if rep.sessions_needed:
             print(f"{YELLOW}needed     {rep.sessions_needed} sessions per arm to "
                   f"detect {rep.effect_bp:.0f}bp{RESET}")

@@ -134,6 +134,7 @@ class CohortReport:
     difference_bp: float | None
     permutation_p: float | None
     pairs: int
+    twinned_pairs: int
     paired_p: float | None
     sessions_needed: int | None
     effect_bp: float
@@ -211,11 +212,21 @@ def cohort_report(
         pnl_mod.session_pnl(conn, a.id).pnl_bp - pnl_mod.session_pnl(conn, b.id).pnl_bp
         for a, b in pairs
     ]
+    n_twinned = cohort.twinned(pairs)
     if not pairs:
         notes.append(
-            "No LLM/baseline pairs: nothing in the schema links a session to its "
-            "control, and no twin is spawned, so the arm comparison is unpaired "
-            "and confounded by whatever the market did on each day."
+            "No LLM/baseline pairs, so the arm comparison is unpaired and "
+            "confounded by whatever the market did on each day. Set "
+            "run_baseline to spawn a twin."
+        )
+    elif n_twinned < len(pairs):
+        # A wall-clock pair saw similar tape, not the same tape. Reporting the
+        # two as one number would overstate the evidence.
+        notes.append(
+            f"{len(pairs) - n_twinned} of {len(pairs)} pairs are wall-clock "
+            f"matches, not twins: those two sessions saw similar tape, not the "
+            f"same tape. Sessions recorded before migration 007 cannot be "
+            f"paired retroactively."
         )
 
     sd = arms[Arm.LLM].sd_bp or arms[Arm.BASELINE].sd_bp
@@ -238,7 +249,8 @@ def cohort_report(
         tier=tier, sessions=metas, excluded=cohort.exclusions(metas), arms=arms,
         difference_bp=difference,
         permutation_p=stats.permutation_p(llm, base),
-        pairs=len(pairs), paired_p=stats.sign_test_p(paired_diffs),
+        pairs=len(pairs), twinned_pairs=n_twinned,
+        paired_p=stats.sign_test_p(paired_diffs),
         sessions_needed=stats.sessions_needed(sd, effect_bp), effect_bp=effect_bp,
         flat_rate=flat_rate,
         conviction=_conviction(conn, usable, min_n_for_correlation),

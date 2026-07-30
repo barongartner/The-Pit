@@ -9,6 +9,8 @@ lies to its owner.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from thepit.core.clock import FixedClock
@@ -49,7 +51,8 @@ def quote(symbol, last, ts=NOW):
     return Quote(symbol=symbol, ts_ms=ts, last=last, source="test", received_ms=ts)
 
 
-def a_runner(conn, clock, *, capital=1_000.0, symbols=("AAPL",), **cfg_kw):
+def a_runner(conn, clock, *, capital=1_000.0, symbols=("AAPL",),
+             use_stub=False, **cfg_kw):
     for s in symbols:
         bars(conn, s, 100.0)
         tick(conn, s, 100.0, clock.now_ms())
@@ -60,7 +63,7 @@ def a_runner(conn, clock, *, capital=1_000.0, symbols=("AAPL",), **cfg_kw):
     assert cfg.validate() == []
     r = SessionRunner(conn, clock, cfg, list(symbols),
                       quotes={s: quote(s, 100.0, clock.now_ms()) for s in symbols},
-                      tier=FeedTier.BARS)
+                      tier=FeedTier.BARS, use_stub=use_stub)
     r.create()
     return r
 
@@ -373,8 +376,7 @@ def test_a_session_with_no_decisions_is_unknown_not_llm(conn):
 
 def test_the_baseline_is_recognised_from_what_the_runner_writes(conn):
     clock = FixedClock(NOW)
-    runner = a_runner(conn, clock)
-    runner.use_stub = True
+    runner = a_runner(conn, clock, use_stub=True)
     conn.execute(
         "INSERT INTO decisions (session_id,ts_ms,phase,prompt) VALUES (?,?,'tick',?)",
         (runner.session_id, NOW, cohort.STUB_PROMPT))
@@ -502,5 +504,134 @@ def test_the_cohort_report_says_what_it_cannot_measure(conn):
     assert rep.arms[cohort.Arm.LLM].sd_bp is None, "one session has no spread"
     assert rep.difference_bp is None, "no baseline to compare against"
     assert rep.pairs == 0
-    assert any("nothing in the schema links" in n for n in rep.notes)
+    assert any("unpaired and" in n for n in rep.notes)
     assert any("one session is a sample" in n.lower() for n in rep.notes)
+
+
+# ---------------------------------------------------------------------------
+# Twinning (migration 007). The paired comparison the project exists to make.
+# ---------------------------------------------------------------------------
+
+
+def _bare_session(conn, sid, arm=None, twin_of=None, created=1_000, ends=61_000,
+                  status="done"):
+    conn.execute(
+        "INSERT INTO sessions (id,created_ms,started_ms,ends_ms,finished_ms,status,"
+        "config,capital,cash,arm,twin_of) VALUES (?,?,?,?,?,?,?,20,20,?,?)",
+        (sid, created, created, ends, ends, status,
+         json.dumps({"symbols": ["AAPL"], "duration_minutes": 1}), arm, twin_of))
+    conn.commit()
+
+
+def test_arm_comes_from_the_column_not_from_prompt_text(conn):
+    """classify() used to string-match an f-string out of the decisions table.
+    Rewording one prompt would have silently reclassified every past session."""
+    _bare_session(conn, 1, arm="llm")
+    _bare_session(conn, 2, arm="baseline")
+    assert cohort.classify(conn, 1) is cohort.Arm.LLM
+    assert cohort.classify(conn, 2) is cohort.Arm.BASELINE
+
+
+def test_legacy_rows_still_classify_from_decisions(conn):
+    """Sessions predating migration 007 have no arm. They must not all become
+    UNKNOWN, or every session recorded before today drops out of the cohort."""
+    _bare_session(conn, 1, arm=None)
+    conn.execute(
+        "INSERT INTO decisions (session_id,ts_ms,phase,prompt,response) "
+        "VALUES (1,1,'tick',?,'{}')", (cohort.STUB_PROMPT,))
+    conn.commit()
+    assert cohort.classify(conn, 1) is cohort.Arm.BASELINE
+
+
+def _twin(conn, llm_id, base_id):
+    """Create a twinned pair the way the API does.
+
+    Order matters: sessions.twin_of has a foreign key, so the LLM row cannot
+    reference its twin before that row exists. Insert, create the twin pointing
+    back, then back-link. A test that inserts them the other way round is
+    testing a state the system cannot produce.
+    """
+    _bare_session(conn, llm_id, arm="llm")
+    _bare_session(conn, base_id, arm="baseline", twin_of=llm_id)
+    conn.execute("UPDATE sessions SET twin_of=? WHERE id=?", (base_id, llm_id))
+    conn.commit()
+
+
+def test_twinned_sessions_pair_on_the_column(conn):
+    _twin(conn, 1, 2)
+    metas = [cohort.meta(conn, 1), cohort.meta(conn, 2)]
+
+    pairs, unpaired = cohort.pair(metas)
+    assert len(pairs) == 1
+    assert {pairs[0][0].id, pairs[0][1].id} == {1, 2}
+    assert unpaired == []
+    assert cohort.twinned(pairs) == 1
+
+
+def test_a_real_twin_is_never_broken_up_to_form_a_guessed_pair(conn):
+    """Two baselines available; the twinned one must win, or a real control gets
+    swapped for a wall-clock guess."""
+    _bare_session(conn, 2, arm="baseline")           # same window, not the twin
+    _twin(conn, 1, 3)
+
+    pairs, unpaired = cohort.pair([cohort.meta(conn, i) for i in (1, 2, 3)])
+    assert len(pairs) == 1
+    assert pairs[0][1].id == 3, "paired with the wall-clock guess over the twin"
+    assert [m.id for m in unpaired] == [2]
+    assert cohort.twinned(pairs) == 1
+
+
+def test_wall_clock_pairs_are_reported_as_not_twinned(conn):
+    """The fallback must stay distinguishable from a real pair wherever it is
+    printed -- the two are not equally good evidence."""
+    _bare_session(conn, 1, arm="llm")
+    _bare_session(conn, 2, arm="baseline")
+
+    pairs, _ = cohort.pair([cohort.meta(conn, 1), cohort.meta(conn, 2)])
+    assert len(pairs) == 1
+    assert cohort.twinned(pairs) == 0
+
+
+def test_untwinned_sessions_still_pair_by_clock(conn):
+    """Everything recorded before migration 007 is unpairable retroactively and
+    must keep falling back rather than vanishing from the cohort."""
+    _bare_session(conn, 1, arm="llm")
+    _bare_session(conn, 2, arm="baseline")
+    pairs, unpaired = cohort.pair([cohort.meta(conn, 1), cohort.meta(conn, 2)])
+    assert len(pairs) == 1 and unpaired == []
+
+
+def test_runner_records_its_own_arm_and_twin_at_create(tmp_path):
+    """The gap that let a broken twin ship.
+
+    An earlier patch to `create()` silently failed to apply and 249 tests still
+    passed, because nothing called it with `twin_of`. The API then raised
+    TypeError on the first real twinned session. Exercise the signature.
+    """
+    from thepit.core.clock import SystemClock
+    from thepit.store import db as db_mod
+
+    conn = db_mod.connect(tmp_path / "t.db")
+    db_mod.migrate(conn)
+    cfg = SessionConfig(duration_minutes=5, policy_tick_minutes=2, capital=20)
+
+    llm = SessionRunner(conn, SystemClock(), cfg, ["AAPL"],
+                        quotes={}, tier=FeedTier.BARS)
+    llm_id = llm.create()
+
+    base = SessionRunner(conn, SystemClock(), cfg, ["AAPL"],
+                         quotes={}, tier=FeedTier.BARS, use_stub=True)
+    base_id = base.create(twin_of=llm_id)
+    conn.execute("UPDATE sessions SET twin_of=? WHERE id=?", (base_id, llm_id))
+    conn.commit()
+
+    rows = {r["id"]: r for r in conn.execute(
+        "SELECT id, arm, twin_of FROM sessions")}
+    assert rows[llm_id]["arm"] == "llm"
+    assert rows[base_id]["arm"] == "baseline"
+    assert rows[llm_id]["twin_of"] == base_id
+    assert rows[base_id]["twin_of"] == llm_id
+
+    assert cohort.classify(conn, llm_id) is cohort.Arm.LLM
+    assert cohort.classify(conn, base_id) is cohort.Arm.BASELINE
+    conn.close()

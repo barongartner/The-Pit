@@ -99,6 +99,7 @@ class SessionRunner:
         quotes: dict[str, Quote],
         tier: FeedTier,
         kill: KillSwitch | None = None,
+        use_stub: bool = False,
     ) -> None:
         self._conn = conn
         self._clock = clock
@@ -122,7 +123,29 @@ class SessionRunner:
         # When true, decisions come from the deterministic rule instead of a
         # model. This is both the fallback when the CLI is unavailable and the
         # control group the LLM has to beat.
-        self.use_stub = False
+        #
+        # Constructor-only, because `create()` now WRITES the arm to the
+        # database rather than leaving it to be inferred. Setting it afterwards
+        # would record the wrong arm and, since the column outranks the
+        # inference, record it authoritatively. A test caught exactly that.
+        self._use_stub = use_stub
+
+    @property
+    def use_stub(self) -> bool:
+        return self._use_stub
+
+    @use_stub.setter
+    def use_stub(self, value: bool) -> None:
+        # `create()` writes `sessions.arm` from this, and the column outranks
+        # the decisions-table inference. Flipping it afterwards would leave a
+        # row that authoritatively claims the wrong arm -- which is worse than
+        # the guesswork the column replaced. Pass it to the constructor.
+        if self.session_id is not None and value != self._use_stub:
+            raise RuntimeError(
+                "use_stub cannot change after create(): sessions.arm is already "
+                "written. Pass use_stub= to SessionRunner()."
+            )
+        self._use_stub = value
 
     # -- activity ------------------------------------------------------------
 
@@ -170,17 +193,25 @@ class SessionRunner:
 
     # -- lifecycle -----------------------------------------------------------
 
-    def create(self) -> int:
+    def create(self, *, twin_of: int | None = None) -> int:
+        """Create the session row.
+
+        `arm` is written here rather than inferred later. `cohort.classify()`
+        otherwise infers it by string-matching an f-string out of the decisions
+        table, which is the fragility 005_provenance.sql removed everywhere
+        else: reword one prompt and every historical session changes arm.
+        """
         now = self._clock.now_ms()
         cur = self._conn.execute(
             "INSERT INTO sessions (created_ms,ends_ms,status,config,capital,cash,"
-            "universe) VALUES (?,?,'planned',?,?,?,?)",
+            "universe,arm,twin_of) VALUES (?,?,'planned',?,?,?,?,?,?)",
             (now, now + self._cfg.duration_minutes * 60_000,
              json.dumps(_config_json(self._cfg)), self._cfg.capital, self._cfg.capital,
              # The symbols actually passed to this runner. `config.symbols` is
              # empty on the default path, so the universe a session traded used
              # to be recoverable only from the text of its plan prompt.
-             json.dumps(list(self._symbols))),
+             json.dumps(list(self._symbols)),
+             "baseline" if self.use_stub else "llm", twin_of),
         )
         self._conn.commit()
         self.session_id = int(cur.lastrowid)

@@ -71,6 +71,7 @@ class SessionMeta:
     fast_loop_seconds: int
     universe: tuple[str, ...]
     tiers: tuple[str, ...]
+    twin_of: int | None
     halt_reason: str | None
     excluded: tuple[str, ...]
 
@@ -87,7 +88,26 @@ class SessionMeta:
 
 
 def classify(conn: sqlite3.Connection, session_id: int) -> Arm:
-    """LLM, baseline, or unknown. Three-valued, never a boolean."""
+    """LLM, baseline, or unknown. Three-valued, never a boolean.
+
+    Prefers `sessions.arm`, written by the runner at creation (migration 007).
+    Falls back to inferring from the decisions table for rows that predate it --
+    that inference string-matches an f-string, so rewording a prompt would
+    silently reclassify history. New rows never take that path.
+    """
+    try:
+        recorded = conn.execute(
+            "SELECT arm FROM sessions WHERE id=?", (session_id,)).fetchone()
+    except sqlite3.OperationalError:
+        # Database predates migration 007. The eval is read-only and must not
+        # be the thing that forces an upgrade -- fall through and infer.
+        recorded = None
+    if recorded is not None and recorded["arm"]:
+        try:
+            return Arm(recorded["arm"])
+        except ValueError:
+            pass
+
     row = conn.execute(
         "SELECT "
         " EXISTS(SELECT 1 FROM decisions d WHERE d.session_id=s.id AND d.prompt=?) "
@@ -119,6 +139,7 @@ def meta(conn: sqlite3.Connection, session_id: int) -> SessionMeta:
 
     money = pnl_mod.session_pnl(conn, session_id)
     arm = classify(conn, session_id)
+    twin_of = row["twin_of"] if "twin_of" in row.keys() else None
 
     excluded: list[str] = []
     if row["status"] in ("running", "flattening", "planned"):
@@ -155,8 +176,8 @@ def meta(conn: sqlite3.Connection, session_id: int) -> SessionMeta:
         duration_minutes=int(config.get("duration_minutes", 0)),
         policy_tick_minutes=int(config.get("policy_tick_minutes", 0)),
         fast_loop_seconds=int(config.get("fast_loop_seconds", 0)),
-        universe=universe, tiers=tiers, halt_reason=row["halt_reason"],
-        excluded=tuple(excluded),
+        universe=universe, tiers=tiers, twin_of=twin_of,
+        halt_reason=row["halt_reason"], excluded=tuple(excluded),
     )
 
 
@@ -198,17 +219,37 @@ def require_single_tier(metas: list[SessionMeta]) -> str:
 def pair(
     metas: list[SessionMeta], *, overlap: float = 0.9
 ) -> tuple[list[tuple[SessionMeta, SessionMeta]], list[SessionMeta]]:
-    """Provisional LLM/baseline pairs, by overlapping wall clock and universe.
+    """LLM/baseline pairs.
 
-    Provisional because nothing in the schema links a session to its control:
-    `run_baseline` is recorded but no twin is ever spawned. Two sessions on the
-    same names over the same minutes saw nearly the same tape, which is the best
-    available substitute and is labelled as one wherever it is printed.
+    Two sources, and they are not equivalent:
+
+    **`twin_of` (migration 007).** A real pair. Both arms were spawned together
+    on the same symbols, the same capital and the same quote snapshot, so the
+    day's market move is common to both and subtracts out of the difference.
+
+    **Wall-clock overlap.** The fallback for sessions recorded before twins
+    existed. Two sessions on the same names over the same minutes saw *similar*
+    tape, not the same tape. It is a substitute for a control and is labelled
+    provisional wherever it is printed.
+
+    Twinned pairs are matched first and their members are then unavailable to
+    the fallback, so a real pair is never broken up to form a guessed one.
     """
-    llm = [m for m in metas if m.arm is Arm.LLM]
-    base = [m for m in metas if m.arm is Arm.BASELINE]
+    by_id = {m.id: m for m in metas}
     used: set[int] = set()
     pairs: list[tuple[SessionMeta, SessionMeta]] = []
+
+    # Real pairs first.
+    for m in metas:
+        if m.twin_of is None or m.id in used or m.arm is not Arm.LLM:
+            continue
+        twin = by_id.get(m.twin_of)
+        if twin is not None and twin.id not in used and twin.arm is Arm.BASELINE:
+            pairs.append((m, twin))
+            used.update({m.id, twin.id})
+
+    llm = [m for m in metas if m.arm is Arm.LLM and m.id not in used]
+    base = [m for m in metas if m.arm is Arm.BASELINE and m.id not in used]
 
     for a in llm:
         for b in base:
@@ -221,6 +262,15 @@ def pair(
 
     paired_ids = {m.id for p in pairs for m in p}
     return pairs, [m for m in metas if m.id not in paired_ids]
+
+
+def twinned(pairs: list[tuple[SessionMeta, SessionMeta]]) -> int:
+    """How many pairs are real twins rather than wall-clock guesses.
+
+    Printed beside the pair count so a paired difference is never read as
+    stronger evidence than it is.
+    """
+    return sum(1 for a, b in pairs if a.twin_of == b.id or b.twin_of == a.id)
 
 
 def _overlap_fraction(a: SessionMeta, b: SessionMeta) -> float:

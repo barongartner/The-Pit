@@ -31,7 +31,7 @@ describes is covered, not when the code compiles.
 
 **Claim migration numbers here before you write the file.** `db._migration_files`
 asserts migrations are gapless from 001, so two sessions both writing `007_*.sql`
-means the system refuses to boot. Highest applied: **006**. Claimed and unwritten:
+means the system refuses to boot. Highest applied: **007**. Claimed and unwritten:
 **007** (see the critical path — one migration carries the whole measurement
 column set).
 
@@ -104,7 +104,7 @@ separately is how a third of a system gets built and called done.
 
 - [ ] **1. Get sessions out of the API process** · large · unblocks six other entries
 - [ ] **2. Migration 007, the whole measurement column set** · medium
-- [~] 2026-07-30 **3. Spawn the baseline twin** · large · highest value on the list
+- [x] 2026-07-30 **3. Spawn the baseline twin** · large · highest value on the list
 - [ ] **4. Record a shakedown cohort** · medium
 - [ ] **5. Database lifecycle: retention, compaction, size, backup, restore** · medium
 - [ ] **6. One flatten.py brake** · medium

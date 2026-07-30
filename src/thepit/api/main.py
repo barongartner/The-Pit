@@ -467,28 +467,63 @@ def create_app(config: cfg.Config, *, allow_control: bool) -> FastAPI:
                     {"errors": ["no prices available yet; let the engine run first"]},
                     status_code=400)
 
-            runner = SessionRunner(
-                wconn, SystemClock(), cfg_obj, symbols,
-                quotes=quotes, tier=FeedTier.BARS,
-                kill=KillSwitch(config.state_dir),
-            )
-            # Fall back to the deterministic baseline when no model is
-            # reachable, rather than failing the session outright. It is the
-            # control group anyway, so running it is never wasted.
-            runner.use_stub = bool(payload.get("use_stub")) or not claude_mod.available()
+            use_stub = bool(payload.get("use_stub")) or not claude_mod.available()
+
+            def build(stub: bool) -> SessionRunner:
+                # Falls back to the deterministic baseline when no model is
+                # reachable, rather than failing the session outright. It is the
+                # control group anyway, so running it is never wasted.
+                return SessionRunner(
+                    wconn, SystemClock(), cfg_obj, symbols,
+                    quotes=quotes, tier=FeedTier.BARS,
+                    kill=KillSwitch(config.state_dir), use_stub=stub,
+                )
+
+            runner = build(use_stub)
             sid = runner.create()
 
+            # The twin. Same symbols, same capital, same clock, and -- through
+            # the shared refresher below -- the same quote snapshot at every
+            # decision.
+            #
+            # Paired is the whole point. Unpaired, the difference between arms is
+            # swamped by whatever the market did that day, which is a confounder
+            # worth far more basis points than any edge being measured. Run
+            # together on one tape, the market move is common to both and
+            # subtracts out.
+            #
+            # Skipped when this session IS the baseline: a control needs no
+            # control, and twinning one would just burn a second slot.
+            twin: SessionRunner | None = None
+            twin_id: int | None = None
+            if cfg_obj.run_baseline and not use_stub:
+                twin = build(True)
+                twin_id = twin.create(twin_of=sid)
+                wconn.execute("UPDATE sessions SET twin_of=? WHERE id=?",
+                              (twin_id, sid))
+                wconn.commit()
+
             async def drive() -> None:
+                runners = [r for r in (runner, twin) if r is not None]
                 try:
                     # Refresh quotes from the recorder while the session runs.
                     # The runner never fetches; it reads what the poller wrote.
+                    # ONE refresher for both arms, so neither can win on a
+                    # fresher tick than the other saw.
                     async def refresh() -> None:
                         while True:
                             await asyncio.sleep(5)
-                            runner.update_quotes(_quotes_for(wconn, symbols))
+                            snapshot = _quotes_for(wconn, symbols)
+                            for r in runners:
+                                r.update_quotes(snapshot)
+
                     task = asyncio.create_task(refresh())
                     try:
-                        await runner.run()
+                        # gather, not a task group: one arm failing must not
+                        # cancel the other. A crashed baseline should cost the
+                        # pairing, not the session.
+                        await asyncio.gather(
+                            *(r.run() for r in runners), return_exceptions=True)
                     finally:
                         task.cancel()
                 finally:
@@ -496,7 +531,9 @@ def create_app(config: cfg.Config, *, allow_control: bool) -> FastAPI:
                         wconn.close()
 
             asyncio.create_task(drive())
-            return JSONResponse({"session_id": sid, "status": "running"})
+            return JSONResponse({
+                "session_id": sid, "twin_id": twin_id, "status": "running",
+            })
 
         app.include_router(control)
 
